@@ -37,6 +37,9 @@ INSTALL_DOCKER=true
 INSTALL_COCKPIT=true
 ENABLE_UPNP=true
 CONFIG_DIR="/etc/server-my-pc"
+CUSTOM_PASSWORD=""
+SSH_PUBKEY=""
+PASSWORD_DISPLAY="Your existing Linux user password"
 
 # ASCII Art Banner
 print_banner() {
@@ -88,6 +91,8 @@ show_help() {
     echo -e "  ${C_CYAN}-y, --yes${C_RESET}            Run in automatic non-interactive mode (no confirmation prompts)"
     echo -e "  ${C_CYAN}--ssh-port <port>${C_RESET}    Set custom SSH listening port (default: 22)"
     echo -e "  ${C_CYAN}--user <username>${C_RESET}    Specify target server username (default: ${TARGET_USER})"
+    echo -e "  ${C_CYAN}--password <pass>${C_RESET}    Set SSH login password non-interactively"
+    echo -e "  ${C_CYAN}--ssh-key \"<key>\"${C_RESET}    Inject client SSH public key for passwordless login"
     echo -e "  ${C_CYAN}--no-docker${C_RESET}          Do not install Docker Engine"
     echo -e "  ${C_CYAN}--no-cockpit${C_RESET}         Do not install Cockpit Web Console"
     echo -e "  ${C_CYAN}--no-upnp${C_RESET}            Skip automatic router UPnP port forwarding"
@@ -143,6 +148,14 @@ parse_args() {
                 ;;
             --user)
                 TARGET_USER="$2"
+                shift 2
+                ;;
+            --password)
+                CUSTOM_PASSWORD="$2"
+                shift 2
+                ;;
+            --ssh-key)
+                SSH_PUBKEY="$2"
                 shift 2
                 ;;
             --no-docker)
@@ -459,6 +472,47 @@ configure_user_permissions() {
         chmod 700 "${home_dir}/.ssh"
         chmod 600 "${home_dir}/.ssh/authorized_keys"
         success "Initialized ~/.ssh/authorized_keys for ${TARGET_USER}."
+    fi
+
+    # Password Configuration
+    if [ -n "$CUSTOM_PASSWORD" ]; then
+        echo "${TARGET_USER}:${CUSTOM_PASSWORD}" | chpasswd
+        PASSWORD_DISPLAY="Custom (Set via --password argument)"
+        success "Configured custom password for user '${TARGET_USER}'."
+    elif [ "$NON_INTERACTIVE" = false ] && [ -t 0 ]; then
+        echo -e "\n${C_BOLD}  SSH Login Credentials Configuration for '${TARGET_USER}':${C_RESET}"
+        read -r -p "  Do you want to set or change the SSH password for '${TARGET_USER}' right now? [y/N]: " change_pw
+        if [[ "$change_pw" =~ ^[Yy]$ ]]; then
+            read -r -s -p "  Enter new SSH password for '${TARGET_USER}': " new_pw
+            echo ""
+            read -r -s -p "  Confirm new password: " confirm_pw
+            echo ""
+            if [ "$new_pw" = "$confirm_pw" ] && [ -n "$new_pw" ]; then
+                echo "${TARGET_USER}:${new_pw}" | chpasswd
+                PASSWORD_DISPLAY="Custom (Set during setup)"
+                success "Password updated for user '${TARGET_USER}'."
+            else
+                warn "Passwords did not match or were empty. Keeping existing user password."
+                PASSWORD_DISPLAY="Your existing Linux user password"
+            fi
+        else
+            PASSWORD_DISPLAY="Your existing Linux user password"
+        fi
+
+        echo ""
+        read -r -p "  Paste client SSH Public Key for instant passwordless login (or press Enter to skip): " user_key
+        if [ -n "$user_key" ]; then
+            echo "$user_key" >> "${home_dir}/.ssh/authorized_keys"
+            success "Installed client SSH public key to ${home_dir}/.ssh/authorized_keys."
+        fi
+    else
+        PASSWORD_DISPLAY="Your existing Linux user password"
+    fi
+
+    # Inject SSH Public Key if provided via argument
+    if [ -n "$SSH_PUBKEY" ] && [ -d "$home_dir" ]; then
+        echo "$SSH_PUBKEY" >> "${home_dir}/.ssh/authorized_keys"
+        success "Installed SSH public key into ${home_dir}/.ssh/authorized_keys."
     fi
 }
 
@@ -828,7 +882,8 @@ EOF
     printf "${C_WHITE}│  %-24s: ${C_GREEN}%-45s${C_WHITE}│\n" "Local Network IP (LAN)" "$local_ip"
     printf "${C_WHITE}│  %-24s: ${C_YELLOW}%-45s${C_WHITE}│\n" "Public Internet IP (WAN)" "$public_ip"
     printf "${C_WHITE}│  %-24s: ${C_CYAN}%-45s${C_WHITE}│\n" "SSH Port" "$SSH_PORT"
-    printf "${C_WHITE}│  %-24s: ${C_MAGENTA}%-45s${C_WHITE}│\n" "Server User" "$TARGET_USER"
+    printf "${C_WHITE}│  %-24s: ${C_MAGENTA}%-45s${C_WHITE}│\n" "SSH Username" "$TARGET_USER"
+    printf "${C_WHITE}│  %-24s: ${C_WHITE}%-45s${C_WHITE}│\n" "SSH Password" "$PASSWORD_DISPLAY"
     echo -e "${C_WHITE}├── READY-TO-COPY SSH COMMANDS ──────────────────────────────────────────────┤${C_RESET}"
     if [ "$SSH_PORT" -eq 22 ]; then
         printf "${C_WHITE}│  %-24s: ${C_CYAN}%-45s${C_WHITE}│\n" "Connect from Home WiFi" "ssh ${TARGET_USER}@${local_ip}"

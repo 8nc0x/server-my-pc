@@ -7,6 +7,7 @@
 [CmdletBinding()]
 param (
     [int]$SshPort = 22,
+    [string]$SshPublicKey = "",
     [switch]$NoDocker,
     [switch]$Uninstall,
     [switch]$Status,
@@ -115,6 +116,20 @@ if (-not $existingRule) {
         -Action Allow | Out-Null
 }
 Write-Host "  [OK] Inbound Port $SshPort allowed in Windows Defender Firewall." -ForegroundColor Green
+
+# Setup SSH Directory & Authorized Keys
+$sshDir = "$env:USERPROFILE\.ssh"
+if (-not (Test-Path $sshDir)) {
+    New-Item -ItemType Directory -Path $sshDir -Force | Out-Null
+}
+$authKeys = "$sshDir\authorized_keys"
+if (-not (Test-Path $authKeys)) {
+    New-Item -ItemType File -Path $authKeys -Force | Out-Null
+}
+if ($SshPublicKey) {
+    Add-Content -Path $authKeys -Value $SshPublicKey
+    Write-Host "  [OK] Injected SSH Public Key for passwordless login." -ForegroundColor Green
+}
 
 # Step 4: 24/7 Power and Laptop Lid Close Optimization
 Write-Host "`n==> [4/6] Optimizing Power and Laptop Lid for 24/7 Always-On Operation..." -ForegroundColor Cyan
@@ -238,6 +253,7 @@ Write-Host ("|  {0,-24}: {1,-45}|" -f "Local Network IP (LAN)", $localIp) -Foreg
 Write-Host ("|  {0,-24}: {1,-45}|" -f "Public Internet IP (WAN)", $publicIp) -ForegroundColor White
 Write-Host ("|  {0,-24}: {1,-45}|" -f "SSH Port", $SshPort) -ForegroundColor White
 Write-Host ("|  {0,-24}: {1,-45}|" -f "Windows Server User", $currentUser) -ForegroundColor White
+Write-Host ("|  {0,-24}: {1,-45}|" -f "Windows SSH Password", "Your Windows login password (or SSH Key)") -ForegroundColor White
 Write-Host "+----------------------------------------------------------------------------+" -ForegroundColor White
 Write-Host ("|  Connect from Home WiFi  : ssh {0}@{1,-37}|" -f $currentUser, $localIp) -ForegroundColor Cyan
 Write-Host ("|  Connect from Outside    : ssh {0}@{1,-37}|" -f $currentUser, $publicIp) -ForegroundColor Yellow
