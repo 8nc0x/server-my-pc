@@ -125,8 +125,26 @@ detect_windows_environment() {
 # Auto-elevate to root if not already root
 ensure_root() {
     if [ "$(id -u)" -ne 0 ]; then
-        warn "Administrative privileges required. Auto-elevating with sudo..."
-        exec sudo bash "$0" "$@"
+        # Check if $0 is an actual script file on disk
+        if [ -f "$0" ] && [ "$0" != "bash" ] && [ "$0" != "sh" ] && [ "$0" != "-bash" ] && [ "$0" != "/usr/bin/bash" ] && [ "$0" != "/bin/bash" ]; then
+            warn "Administrative privileges required. Auto-elevating with sudo..."
+            exec sudo bash "$0" "$@"
+        else
+            warn "Administrative privileges required. Auto-elevating with sudo..."
+            local tmp_script="/tmp/server-my-pc-setup.sh"
+            if curl -sSL "https://raw.githubusercontent.com/8nc0x/server-my-pc/main/setup.sh" -o "$tmp_script" 2>/dev/null || wget -qO "$tmp_script" "https://raw.githubusercontent.com/8nc0x/server-my-pc/main/setup.sh" 2>/dev/null; then
+                chmod +x "$tmp_script"
+                if [ -c /dev/tty ]; then
+                    exec sudo bash "$tmp_script" "$@" < /dev/tty
+                else
+                    exec sudo bash "$tmp_script" "$@"
+                fi
+            else
+                echo -e "\n${C_RED}[!] Error: Administrative privileges required.${C_RESET}"
+                echo -e "${C_YELLOW}[*] Please run:${C_RESET} ${C_GREEN}${C_BOLD}curl -sL is.gd/serverpc | sudo bash${C_RESET}\n"
+                exit 1
+            fi
+        fi
     fi
 }
 

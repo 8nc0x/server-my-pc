@@ -29,9 +29,9 @@ Have an old laptop, desktop, or spare computer collecting dust? **`server-my-pc`
 
 ### 🐧 On Linux (Takes 3 Seconds to Type):
 ```bash
-curl -sL is.gd/serverpc | bash
+curl -sL is.gd/serverpc | sudo bash
 ```
-*(Or if your machine only has `wget`: `wget -qO- is.gd/serverpc | bash`)*
+*(Or if your machine only has `wget`: `wget -qO- is.gd/serverpc | sudo bash`)*
 
 ### 🪟 On Windows (In Administrator PowerShell):
 ```powershell
