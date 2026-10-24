@@ -1,0 +1,836 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# serverctl - Unified Bare-Metal Server Management CLI & Live Dashboard
+# Part of server-my-pc (https://github.com/8nc0x/server-my-pc)
+# ==============================================================================
+
+set -e
+
+# Version
+VERSION="1.0.0"
+
+# Colors
+C_RESET="\033[0m"
+C_BOLD="\033[1m"
+C_DIM="\033[2m"
+C_RED="\033[38;5;196m"
+C_GREEN="\033[38;5;46m"
+C_YELLOW="\033[38;5;226m"
+C_BLUE="\033[38;5;39m"
+C_MAGENTA="\033[38;5;201m"
+C_CYAN="\033[38;5;51m"
+C_WHITE="\033[38;5;231m"
+C_GRAY="\033[38;5;244m"
+C_BG_BLUE="\033[48;5;24m"
+C_BG_DARK="\033[48;5;235m"
+
+CONFIG_DIR="/etc/server-my-pc"
+NOTIFY_CONFIG="${CONFIG_DIR}/notify.conf"
+PRESET_FILE="${CONFIG_DIR}/preset"
+BACKUP_DIR="/var/backups/server-my-pc"
+
+# Ensure root for administrative commands
+require_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        echo -e "${C_RED}[!] Error:${C_RESET} This command requires administrative privileges."
+        echo -e "${C_YELLOW}[*] Please run:${C_RESET} sudo serverctl $*"
+        exit 1
+    fi
+}
+
+# Banner
+show_banner() {
+    echo -e "${C_CYAN}${C_BOLD}"
+    cat << "EOF"
+  ____                                __  __           ____   ____ 
+ / ___|  ___ _ ____   _____ _ __     |  \/  |_   _    |  _ \ / ___|
+ \___ \ / _ \ '__\ \ / / _ \ '__|____| |\/| | | | |___| |_) | |    
+  ___) |  __/ |   \ V /  __/ | |_____| |  | | |_| |___|  __/| |___ 
+ |____/ \___|_|    \_/ \___|_|       |_|  |_|\__, |   |_|    \____|
+                                             |___/                 
+EOF
+    echo -e "${C_RESET}${C_DIM}             Next-Gen 24/7 PC & Laptop Server Control - v${VERSION}${C_RESET}\n"
+}
+
+# Detect Network IPs
+get_local_ip() {
+    local ip
+    ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
+    if [ -z "$ip" ]; then
+        ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    fi
+    [ -z "$ip" ] && ip="127.0.0.1"
+    echo "$ip"
+}
+
+get_public_ip() {
+    local ip
+    ip=$(curl -s --max-time 2 https://api.ipify.org 2>/dev/null || curl -s --max-time 2 https://ifconfig.me 2>/dev/null || curl -s --max-time 2 https://icanhazip.com 2>/dev/null || echo "Unknown/Offline")
+    echo "$ip"
+}
+
+# Thermal Information
+get_cpu_temp() {
+    local temp="N/A"
+    if [ -f /sys/class/thermal/thermal_zone0/temp ]; then
+        local raw
+        raw=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+        if [ -n "$raw" ] && [ "$raw" -gt 0 ] 2>/dev/null; then
+            temp="$((raw / 1000))°C"
+        fi
+    elif command -v sensors >/dev/null 2>&1; then
+        local s
+        s=$(sensors 2>/dev/null | grep -E -m1 '(Core 0|Package id 0|Tctl|CPU Temp):' | awk '{print $2}' | tr -d '+')
+        [ -n "$s" ] && temp="$s"
+    fi
+    echo "$temp"
+}
+
+# Battery Information
+get_battery_info() {
+    local bat_path=""
+    for b in /sys/class/power_supply/BAT* /sys/class/power_supply/battery; do
+        if [ -d "$b" ]; then
+            bat_path="$b"
+            break
+        fi
+    done
+
+    if [ -n "$bat_path" ] && [ -f "$bat_path/capacity" ]; then
+        local cap status
+        cap=$(cat "$bat_path/capacity" 2>/dev/null)
+        status=$(cat "$bat_path/status" 2>/dev/null)
+        echo "${cap}% (${status})"
+    else
+        echo "AC Desktop / No Battery"
+    fi
+}
+
+# Check Service Status
+check_service() {
+    local svc="$1"
+    if systemctl is-active --quiet "$svc" 2>/dev/null; then
+        echo -e "${C_GREEN}● ACTIVE${C_RESET}"
+    elif systemctl is-enabled --quiet "$svc" 2>/dev/null; then
+        echo -e "${C_YELLOW}○ INACTIVE${C_RESET}"
+    else
+        echo -e "${C_RED}✕ NOT INSTALLED${C_RESET}"
+    fi
+}
+
+# Status Command
+cmd_status() {
+    show_banner
+
+    local local_ip public_ip uptime_str os_name cpu_load ram_usage disk_usage temp bat
+    local_ip=$(get_local_ip)
+    public_ip=$(get_public_ip)
+    uptime_str=$(uptime -p 2>/dev/null | sed 's/up //' || uptime | awk '{print $3,$4}' | tr -d ',')
+    
+    if [ -f /etc/os-release ]; then
+        os_name=$(grep -E '^PRETTY_NAME=' /etc/os-release | cut -d= -f2 | tr -d '"')
+    else
+        os_name="$(uname -s) $(uname -r)"
+    fi
+
+    cpu_load=$(awk '{print $1", "$2", "$3}' /proc/loadavg 2>/dev/null || echo "N/A")
+    ram_usage=$(free -h 2>/dev/null | awk '/Mem:/ {print $3 "/" $2}')
+    disk_usage=$(df -h / 2>/dev/null | awk 'NR==2 {print $3 "/" $2 " (" $5 ")"}')
+    temp=$(get_cpu_temp)
+    bat=$(get_battery_info)
+
+    local preset="standard"
+    [ -f "$PRESET_FILE" ] && preset=$(cat "$PRESET_FILE")
+
+    echo -e "${C_WHITE}${C_BOLD}┌── SYSTEM TELEMETRY ────────────────────────────────────────────────────────┐${C_RESET}"
+    printf "${C_WHITE}│  %-24s: ${C_CYAN}%-45s${C_WHITE}│\n" "Operating System" "$os_name"
+    printf "${C_WHITE}│  %-24s: ${C_GREEN}%-45s${C_WHITE}│\n" "Uptime" "$uptime_str"
+    printf "${C_WHITE}│  %-24s: ${C_YELLOW}%-45s${C_WHITE}│\n" "Load Average (1/5/15)" "$cpu_load"
+    printf "${C_WHITE}│  %-24s: ${C_BLUE}%-45s${C_WHITE}│\n" "Memory Usage" "$ram_usage"
+    printf "${C_WHITE}│  %-24s: ${C_MAGENTA}%-45s${C_WHITE}│\n" "Storage (Root /)" "$disk_usage"
+    printf "${C_WHITE}│  %-24s: ${C_CYAN}%-45s${C_WHITE}│\n" "CPU Temperature" "$temp"
+    printf "${C_WHITE}│  %-24s: ${C_WHITE}%-45s${C_WHITE}│\n" "Power / Battery" "$bat"
+    printf "${C_WHITE}│  %-24s: ${C_GREEN}%-45s${C_WHITE}│\n" "Installed Preset" "$preset"
+    echo -e "${C_WHITE}├── 24/7 NETWORK & CONNECTIVITY ─────────────────────────────────────────────┤${C_RESET}"
+    printf "${C_WHITE}│  %-24s: ${C_GREEN}%-45s${C_WHITE}│\n" "Local LAN IP" "$local_ip"
+    printf "${C_WHITE}│  %-24s: ${C_YELLOW}%-45s${C_WHITE}│\n" "Public WAN IP" "$public_ip"
+    printf "${C_WHITE}│  %-24s: ${C_CYAN}%-45s${C_WHITE}│\n" "SSH Connection (Local)" "ssh $(whoami)@$local_ip"
+    printf "${C_WHITE}│  %-24s: ${C_MAGENTA}%-45s${C_WHITE}│\n" "SSH Connection (Public)" "ssh $(whoami)@$public_ip"
+    if systemctl is-active --quiet cockpit.socket 2>/dev/null; then
+        printf "${C_WHITE}│  %-24s: ${C_BLUE}%-45s${C_WHITE}│\n" "Cockpit Web Console" "https://$local_ip:9090"
+    fi
+    echo -e "${C_WHITE}├── CORE SERVICES HEALTH ────────────────────────────────────────────────────┤${C_RESET}"
+    
+    local ssh_status fail2ban_status watchdog_status thermal_status docker_status
+    ssh_status=$(check_service ssh || check_service sshd)
+    fail2ban_status=$(check_service fail2ban)
+    watchdog_status=$(check_service server-watchdog.timer || check_service server-watchdog)
+    thermal_status=$(check_service server-thermal-guard)
+    docker_status=$(check_service docker)
+
+    printf "${C_WHITE}│  %-24s: %-54s${C_WHITE}│\n" "OpenSSH Server" "$ssh_status"
+    printf "${C_WHITE}│  %-24s: %-54s${C_WHITE}│\n" "Fail2ban Defense" "$fail2ban_status"
+    printf "${C_WHITE}│  %-24s: %-54s${C_WHITE}│\n" "Network Watchdog" "$watchdog_status"
+    printf "${C_WHITE}│  %-24s: %-54s${C_WHITE}│\n" "Thermal Guard" "$thermal_status"
+    printf "${C_WHITE}│  %-24s: %-54s${C_WHITE}│\n" "Docker Engine" "$docker_status"
+
+    # Lid close status
+    local lid_status="Active 24/7 (Sleep Inhibited)"
+    if [ -f /etc/systemd/logind.conf.d/99-server-my-pc.conf ]; then
+        if grep -q "HandleLidSwitch=ignore" /etc/systemd/logind.conf.d/99-server-my-pc.conf 2>/dev/null; then
+            lid_status="${C_GREEN}Lid-Close Ignored (Always ON)${C_WHITE}"
+        else
+            lid_status="${C_YELLOW}Normal (Sleep on Lid Close)${C_WHITE}"
+        fi
+    fi
+    printf "${C_WHITE}│  %-24s: %-54s${C_WHITE}│\n" "Lid-Close Policy" "$lid_status"
+    echo -e "${C_WHITE}└────────────────────────────────────────────────────────────────────────────┘${C_RESET}"
+}
+
+# Detailed Connection Info
+cmd_info() {
+    show_banner
+    local local_ip public_ip ssh_port user
+    local_ip=$(get_local_ip)
+    public_ip=$(get_public_ip)
+    user=$(whoami)
+    ssh_port=22
+    if [ -f /etc/ssh/sshd_config ]; then
+        local p
+        p=$(grep -E '^[[:space:]]*Port[[:space:]]+' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | tail -n1 | awk '{print $2}')
+        [ -n "$p" ] && ssh_port="$p"
+    fi
+
+    echo -e "${C_GREEN}${C_BOLD}=== COMPLETE SERVER ACCESS DETAILS ===${C_RESET}\n"
+    echo -e "${C_BOLD}1. Local Network Connection (Home / Office WiFi):${C_RESET}"
+    if [ "$ssh_port" -eq 22 ]; then
+        echo -e "   ${C_CYAN}ssh ${user}@${local_ip}${C_RESET}"
+    else
+        echo -e "   ${C_CYAN}ssh -p ${ssh_port} ${user}@${local_ip}${C_RESET}"
+    fi
+
+    echo -e "\n${C_BOLD}2. Remote / Internet Access:${C_RESET}"
+    if [ "$ssh_port" -eq 22 ]; then
+        echo -e "   ${C_CYAN}ssh ${user}@${public_ip}${C_RESET}"
+    else
+        echo -e "   ${C_CYAN}ssh -p ${ssh_port} ${user}@${public_ip}${C_RESET}"
+    fi
+
+    echo -e "\n${C_BOLD}3. Web-Based Terminal & Dashboard (Cockpit):${C_RESET}"
+    echo -e "   URL: ${C_BLUE}https://${local_ip}:9090${C_RESET}"
+    echo -e "   Login with your regular Linux username (${user}) and password."
+
+    echo -e "\n${C_BOLD}4. Router Port Forwarding Guide (For Public Access):${C_RESET}"
+    echo -e "   If accessing from outside your home Wi-Fi:"
+    echo -e "   - Open your home router admin page (usually http://192.168.1.1 or 192.168.0.1)"
+    echo -e "   - Navigate to ${C_YELLOW}Port Forwarding${C_RESET} or ${C_YELLOW}Virtual Server${C_RESET}"
+    echo -e "   - Forward External Port: ${C_YELLOW}${ssh_port}${C_RESET} -> Internal IP: ${C_YELLOW}${local_ip}${C_RESET} -> Internal Port: ${C_YELLOW}${ssh_port}${C_RESET} (TCP)"
+    echo -e "   - Forward External Port: ${C_YELLOW}9090${C_RESET} -> Internal IP: ${C_YELLOW}${local_ip}${C_RESET} -> Internal Port: ${C_YELLOW}9090${C_RESET} (TCP, optional for Web Console)"
+
+    echo -e "\n${C_BOLD}5. Stuck behind CGNAT or Strict ISP?${C_RESET}"
+    echo -e "   Run: ${C_GREEN}sudo serverctl tunnel start${C_RESET} to get a free, zero-signup secure tunnel URL immediately!\n"
+}
+
+# Live Interactive Dashboard
+cmd_dashboard() {
+    clear
+    trap "clear; exit 0" INT TERM
+
+    while true; do
+        tput cup 0 0
+        echo -e "${C_CYAN}${C_BOLD}=== SERVER-MY-PC REAL-TIME DASHBOARD === (${C_WHITE}$(date '+%Y-%m-%d %H:%M:%S')${C_CYAN}) ===${C_RESET}"
+        echo -e "${C_DIM}Press Ctrl+C to exit dashboard.${C_RESET}\n"
+
+        local local_ip uptime_str temp bat ram_usage disk_usage cpu_load
+        local_ip=$(get_local_ip)
+        uptime_str=$(uptime -p 2>/dev/null || uptime | awk '{print $3,$4}')
+        temp=$(get_cpu_temp)
+        bat=$(get_battery_info)
+        ram_usage=$(free -h 2>/dev/null | awk '/Mem:/ {print $3 "/" $2 " (" int($3/$2*100) "%)"}')
+        disk_usage=$(df -h / 2>/dev/null | awk 'NR==2 {print $3 "/" $2 " (" $5 ")"}')
+        cpu_load=$(awk '{print $1", "$2", "$3}' /proc/loadavg 2>/dev/null || echo "N/A")
+
+        echo -e "${C_WHITE}${C_BOLD}Telemetry:${C_RESET}"
+        printf "  %-18s: ${C_GREEN}%-20s${C_RESET}  %-18s: ${C_YELLOW}%-20s${C_RESET}\n" "IP Address" "$local_ip" "Load (1/5/15)" "$cpu_load"
+        printf "  %-18s: ${C_BLUE}%-20s${C_RESET}  %-18s: ${C_MAGENTA}%-20s${C_RESET}\n" "RAM Usage" "$ram_usage" "Disk (/)" "$disk_usage"
+        printf "  %-18s: ${C_CYAN}%-20s${C_RESET}  %-18s: ${C_WHITE}%-20s${C_RESET}\n" "CPU Temp" "$temp" "Battery/AC" "$bat"
+        printf "  %-18s: ${C_GREEN}%-20s${C_RESET}\n" "Uptime" "$uptime_str"
+
+        echo -e "\n${C_WHITE}${C_BOLD}Active SSH Logins:${C_RESET}"
+        who 2>/dev/null | awk '{printf "  " "\033[38;5;46m" "%-12s" "\033[0m" " from %-18s at %s %s\n", $1, $5, $3, $4}' || echo "  None"
+
+        echo -e "\n${C_WHITE}${C_BOLD}Docker Containers (Top 5):${C_RESET}"
+        if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker 2>/dev/null; then
+            docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null | head -n 6 | sed 's/^/  /' || echo "  Docker is running (no containers)"
+        else
+            echo -e "  ${C_DIM}Docker not installed or not running.${C_RESET}"
+        fi
+
+        echo -e "\n${C_WHITE}${C_BOLD}Security & Fail2ban Status:${C_RESET}"
+        if command -v fail2ban-client >/dev/null 2>&1 && systemctl is-active --quiet fail2ban 2>/dev/null; then
+            local banned
+            banned=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned:" | awk '{print $NF}' || echo "0")
+            echo -e "  Fail2ban SSH Jail: ${C_GREEN}Active${C_RESET} | Currently Banned Attackers: ${C_RED}${banned}${C_RESET}"
+        else
+            echo -e "  ${C_DIM}Fail2ban not active.${C_RESET}"
+        fi
+
+        sleep 2
+    done
+}
+
+# Firewall Port Management
+cmd_open_port() {
+    require_root
+    local port="$1"
+    local proto="${2:-tcp}"
+
+    if [ -z "$port" ]; then
+        echo -e "${C_RED}[!] Usage: serverctl open-port <port_number> [tcp|udp]${C_RESET}"
+        exit 1
+    fi
+
+    echo -e "${C_CYAN}[*] Opening port ${port}/${proto} in firewall...${C_RESET}"
+    if command -v ufw >/dev/null 2>&1; then
+        ufw allow "${port}/${proto}"
+        echo -e "${C_GREEN}[✓] Port ${port}/${proto} opened in UFW.${C_RESET}"
+    elif command -v firewall-cmd >/dev/null 2>&1; then
+        firewall-cmd --permanent --add-port="${port}/${proto}"
+        firewall-cmd --reload
+        echo -e "${C_GREEN}[✓] Port ${port}/${proto} opened in firewalld.${C_RESET}"
+    elif command -v iptables >/dev/null 2>&1; then
+        iptables -I INPUT -p "${proto}" --dport "${port}" -j ACCEPT
+        echo -e "${C_GREEN}[✓] Port ${port}/${proto} opened in iptables.${C_RESET}"
+    else
+        echo -e "${C_YELLOW}[!] No supported firewall detected (UFW/firewalld/iptables).${C_RESET}"
+    fi
+
+    # Attempt UPnP router port forward
+    if command -v upnpc >/dev/null 2>&1; then
+        local local_ip
+        local_ip=$(get_local_ip)
+        echo -e "${C_CYAN}[*] Requesting UPnP router port forward for ${port}...${C_RESET}"
+        upnpc -a "$local_ip" "$port" "$port" "$proto" >/dev/null 2>&1 || true
+    fi
+}
+
+cmd_close_port() {
+    require_root
+    local port="$1"
+    local proto="${2:-tcp}"
+
+    if [ -z "$port" ]; then
+        echo -e "${C_RED}[!] Usage: serverctl close-port <port_number> [tcp|udp]${C_RESET}"
+        exit 1
+    fi
+
+    echo -e "${C_CYAN}[*] Closing port ${port}/${proto} in firewall...${C_RESET}"
+    if command -v ufw >/dev/null 2>&1; then
+        ufw delete allow "${port}/${proto}"
+        echo -e "${C_GREEN}[✓] Port ${port}/${proto} closed in UFW.${C_RESET}"
+    elif command -v firewall-cmd >/dev/null 2>&1; then
+        firewall-cmd --permanent --remove-port="${port}/${proto}"
+        firewall-cmd --reload
+        echo -e "${C_GREEN}[✓] Port ${port}/${proto} closed in firewalld.${C_RESET}"
+    elif command -v iptables >/dev/null 2>&1; then
+        iptables -D INPUT -p "${proto}" --dport "${port}" -j ACCEPT 2>/dev/null || true
+        echo -e "${C_GREEN}[✓] Port ${port}/${proto} closed in iptables.${C_RESET}"
+    fi
+
+    if command -v upnpc >/dev/null 2>&1; then
+        upnpc -d "$port" "$proto" >/dev/null 2>&1 || true
+    fi
+}
+
+# Lid Management
+cmd_lid() {
+    require_root
+    local action="$1"
+    local conf="/etc/systemd/logind.conf.d/99-server-my-pc.conf"
+    mkdir -p "/etc/systemd/logind.conf.d"
+
+    case "$action" in
+        ignore|server|on)
+            cat > "$conf" << "EOF"
+[Login]
+HandleLidSwitch=ignore
+HandleLidSwitchExternalPower=ignore
+HandleLidSwitchDocked=ignore
+LidSwitchIgnoreInhibited=no
+IdleAction=ignore
+HandleSuspendKey=ignore
+HandleHibernateKey=ignore
+EOF
+            systemctl restart systemd-logind 2>/dev/null || systemctl kill -s HUP systemd-logind 2>/dev/null || true
+            systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target >/dev/null 2>&1 || true
+            echo -e "${C_GREEN}[✓] 24/7 Lid-Close sleep is DISABLED. The PC will stay active 24/7 even with lid shut.${C_RESET}"
+            ;;
+        normal|laptop|off)
+            rm -f "$conf"
+            systemctl unmask sleep.target suspend.target hibernate.target hybrid-sleep.target >/dev/null 2>&1 || true
+            systemctl restart systemd-logind 2>/dev/null || systemctl kill -s HUP systemd-logind 2>/dev/null || true
+            echo -e "${C_YELLOW}[✓] Normal laptop lid behavior RESTORED. System will sleep when lid closes.${C_RESET}"
+            ;;
+        status|"")
+            if [ -f "$conf" ] && grep -q "HandleLidSwitch=ignore" "$conf"; then
+                echo -e "${C_GREEN}● Current Lid State: SERVER MODE (Lid close is ignored, stays 24/7 awake)${C_RESET}"
+            else
+                echo -e "${C_YELLOW}○ Current Lid State: NORMAL MODE (Sleeps on lid close)${C_RESET}"
+            fi
+            ;;
+        *)
+            echo -e "${C_RED}[!] Usage: serverctl lid [ignore|normal|status]${C_RESET}"
+            ;;
+    esac
+}
+
+# Battery Health Management
+cmd_battery() {
+    local action="$1"
+    local val="$2"
+    local threshold_file=""
+
+    for f in /sys/class/power_supply/BAT*/charge_control_limit_max /sys/class/power_supply/BAT*/charge_start_threshold; do
+        if [ -f "$f" ]; then
+            threshold_file="$f"
+            break
+        fi
+    done
+
+    case "$action" in
+        status|"")
+            echo -e "${C_BOLD}=== Battery Health & Threshold Status ===${C_RESET}"
+            get_battery_info
+            if [ -n "$threshold_file" ]; then
+                echo -e "Hardware Charge Limit Supported: ${C_GREEN}YES${C_RESET} (${threshold_file})"
+                echo -e "Current Limit: $(cat "$threshold_file")%"
+            else
+                echo -e "Hardware Charge Limit Supported: ${C_YELLOW}Not exposed by current ACPI driver${C_RESET}"
+            fi
+            ;;
+        limit|set)
+            require_root
+            if [ -z "$val" ]; then
+                echo -e "${C_RED}[!] Usage: serverctl battery limit <percent (e.g. 80)>${C_RESET}"
+                exit 1
+            fi
+            if [ -n "$threshold_file" ]; then
+                echo "$val" > "$threshold_file"
+                echo -e "${C_GREEN}[✓] Battery charge threshold set to ${val}%. Laptop battery will not overcharge.${C_RESET}"
+            else
+                echo -e "${C_YELLOW}[!] Battery charge control file not exposed by this laptop motherboard.${C_RESET}"
+            fi
+            ;;
+        *)
+            echo -e "${C_RED}[!] Usage: serverctl battery [status|limit <percent>]${C_RESET}"
+            ;;
+    esac
+}
+
+# Zero-Signup CGNAT Tunnel Helper
+cmd_tunnel() {
+    local action="${1:-status}"
+
+    case "$action" in
+        start)
+            require_root
+            echo -e "${C_CYAN}[*] Starting zero-signup encrypted tunnel for remote access...${C_RESET}"
+            
+            # Check for cloudflared
+            if ! command -v cloudflared >/dev/null 2>&1; then
+                echo -e "${C_YELLOW}[*] Installing Cloudflare Quick Tunnel binary (zero-account required)...${C_RESET}"
+                local arch
+                arch=$(uname -m)
+                local url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+                [ "$arch" = "aarch64" ] && url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
+                [ "$arch" = "armv7l" ] && url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm"
+                curl -sSL "$url" -o /usr/local/bin/cloudflared
+                chmod +x /usr/local/bin/cloudflared
+            fi
+
+            echo -e "${C_GREEN}[*] Launching Quick Tunnel for SSH (Port 22)...${C_RESET}"
+            nohup cloudflared tunnel --url ssh://localhost:22 > /var/log/server-my-pc-tunnel.log 2>&1 &
+            sleep 3
+            local tunnel_url
+            tunnel_url=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /var/log/server-my-pc-tunnel.log | head -n1 || echo "")
+            if [ -n "$tunnel_url" ]; then
+                echo -e "${C_GREEN}${C_BOLD}[✓] Tunnel is ACTIVE!${C_RESET}"
+                echo -e "Public Tunnel Hostname: ${C_CYAN}${tunnel_url}${C_RESET}"
+                echo -e "You can connect via Cloudflare Access or cloudflared client."
+            else
+                echo -e "${C_YELLOW}[*] Tunnel started in background. Check: serverctl tunnel status${C_RESET}"
+            fi
+            ;;
+        stop)
+            require_root
+            pkill -f "cloudflared tunnel" 2>/dev/null || true
+            echo -e "${C_GREEN}[✓] Remote tunnel stopped.${C_RESET}"
+            ;;
+        status)
+            if pgrep -f "cloudflared tunnel" >/dev/null 2>&1; then
+                echo -e "${C_GREEN}● Remote Tunnel: RUNNING${C_RESET}"
+                if [ -f /var/log/server-my-pc-tunnel.log ]; then
+                    local url
+                    url=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /var/log/server-my-pc-tunnel.log | tail -n1 || echo "Checking logs...")
+                    echo -e "Public Endpoint: ${C_CYAN}${url}${C_RESET}"
+                fi
+            else
+                echo -e "${C_YELLOW}○ Remote Tunnel: INACTIVE${C_RESET}"
+                echo -e "Run: ${C_CYAN}sudo serverctl tunnel start${C_RESET} to enable."
+            fi
+            ;;
+        *)
+            echo -e "${C_RED}[!] Usage: serverctl tunnel [start|stop|status]${C_RESET}"
+            ;;
+    esac
+}
+
+# 1-Click App Catalog
+cmd_apps() {
+    local action="$1"
+    local app="$2"
+
+    if ! command -v docker >/dev/null 2>&1; then
+        echo -e "${C_RED}[!] Error: Docker is not installed on this system.${C_RESET}"
+        echo -e "${C_YELLOW}[*] To install Docker, re-run setup.sh or install via your package manager.${C_RESET}"
+        exit 1
+    fi
+
+    case "$action" in
+        list|"")
+            echo -e "${C_WHITE}${C_BOLD}=== 1-CLICK DOCKER APP CATALOG ===${C_RESET}\n"
+            printf "${C_CYAN}%-20s${C_WHITE} : %-50s\n" "portainer" "Web-based Docker container management UI (Port 9443/9000)"
+            printf "${C_CYAN}%-20s${C_WHITE} : %-50s\n" "nginx-proxy-manager" "Visual reverse proxy with automated free SSL certificates (Port 81)"
+            printf "${C_CYAN}%-20s${C_WHITE} : %-50s\n" "filebrowser" "Web file manager to upload/download files via browser (Port 8080)"
+            printf "${C_CYAN}%-20s${C_WHITE} : %-50s\n" "uptime-kuma" "Self-hosted uptime and service monitoring dashboard (Port 3001)"
+            printf "${C_CYAN}%-20s${C_WHITE} : %-50s\n" "wireguard-easy" "One-click WireGuard VPN with web UI management (Port 51820/51821)"
+            echo -e "\n${C_DIM}Run: sudo serverctl apps install <app_name>${C_RESET}"
+            ;;
+        install)
+            require_root
+            local local_ip
+            local_ip=$(get_local_ip)
+
+            case "$app" in
+                portainer)
+                    echo -e "${C_CYAN}[*] Deploying Portainer Community Edition...${C_RESET}"
+                    docker volume create portainer_data >/dev/null
+                    docker run -d -p 8000:8000 -p 9443:9443 -p 9000:9000 --name portainer --restart=always -v /var/run/docker.sock:/var/run/docker.sock -v portainer_data:/data portainer/portainer-ce:latest
+                    cmd_open_port 9443 tcp
+                    cmd_open_port 9000 tcp
+                    echo -e "${C_GREEN}[✓] Portainer deployed! Access at:${C_RESET} ${C_BOLD}https://${local_ip}:9443${C_RESET}"
+                    ;;
+                nginx-proxy-manager)
+                    echo -e "${C_CYAN}[*] Deploying Nginx Proxy Manager...${C_RESET}"
+                    mkdir -p /opt/npm/data /opt/npm/letsencrypt
+                    docker run -d --name nginx-proxy-manager --restart=always -p 80:80 -p 81:81 -p 443:443 -v /opt/npm/data:/data -v /opt/npm/letsencrypt:/etc/letsencrypt jc21/nginx-proxy-manager:latest
+                    cmd_open_port 80 tcp
+                    cmd_open_port 81 tcp
+                    cmd_open_port 443 tcp
+                    echo -e "${C_GREEN}[✓] Nginx Proxy Manager deployed! Access admin UI at:${C_RESET} ${C_BOLD}http://${local_ip}:81${C_RESET} (Default: admin@example.com / changeme)"
+                    ;;
+                filebrowser)
+                    echo -e "${C_CYAN}[*] Deploying FileBrowser Web File Manager...${C_RESET}"
+                    mkdir -p /opt/filebrowser/srv /opt/filebrowser/config
+                    touch /opt/filebrowser/config/filebrowser.db
+                    docker run -d --name filebrowser --restart=always -v /:/srv -v /opt/filebrowser/config/filebrowser.db:/database/filebrowser.db -p 8080:80 filebrowser/filebrowser:latest
+                    cmd_open_port 8080 tcp
+                    echo -e "${C_GREEN}[✓] FileBrowser deployed! Access files at:${C_RESET} ${C_BOLD}http://${local_ip}:8080${C_RESET} (Default: admin / admin)"
+                    ;;
+                uptime-kuma)
+                    echo -e "${C_CYAN}[*] Deploying Uptime Kuma Monitoring Dashboard...${C_RESET}"
+                    docker volume create uptime-kuma >/dev/null
+                    docker run -d --name uptime-kuma --restart=always -p 3001:3001 -v uptime-kuma:/app/data louislam/uptime-kuma:latest
+                    cmd_open_port 3001 tcp
+                    echo -e "${C_GREEN}[✓] Uptime Kuma deployed! Access at:${C_RESET} ${C_BOLD}http://${local_ip}:3001${C_RESET}"
+                    ;;
+                *)
+                    echo -e "${C_RED}[!] Unknown app: ${app}${C_RESET}. Run: serverctl apps list"
+                    exit 1
+                    ;;
+            esac
+            ;;
+        remove)
+            require_root
+            echo -e "${C_YELLOW}[*] Stopping and removing container ${app}...${C_RESET}"
+            docker stop "$app" 2>/dev/null && docker rm "$app" 2>/dev/null || true
+            echo -e "${C_GREEN}[✓] App container ${app} removed.${C_RESET}"
+            ;;
+        *)
+            echo -e "${C_RED}[!] Usage: serverctl apps [list|install <app>|remove <app>]${C_RESET}"
+            ;;
+    esac
+}
+
+# Security & Fail2ban Audit
+cmd_security() {
+    local action="${1:-audit}"
+    local target="$2"
+
+    case "$action" in
+        audit)
+            echo -e "${C_WHITE}${C_BOLD}=== SERVER SECURITY AUDIT ===${C_RESET}\n"
+            # Root login status
+            local root_ssh="Unknown"
+            if [ -f /etc/ssh/sshd_config ]; then
+                if grep -E '^[[:space:]]*PermitRootLogin[[:space:]]+no' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | grep -q "no"; then
+                    root_ssh="${C_GREEN}Disabled (Secure)${C_RESET}"
+                else
+                    root_ssh="${C_YELLOW}Enabled or Default${C_RESET}"
+                fi
+            fi
+            echo -e "Root SSH Login: $root_ssh"
+
+            # Firewall status
+            local fw_status="Disabled"
+            if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+                fw_status="${C_GREEN}UFW Active${C_RESET}"
+            elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state 2>/dev/null | grep -q "running"; then
+                fw_status="${C_GREEN}firewalld Active${C_RESET}"
+            fi
+            echo -e "Firewall Defense: $fw_status"
+
+            # Fail2ban status
+            if command -v fail2ban-client >/dev/null 2>&1 && systemctl is-active --quiet fail2ban 2>/dev/null; then
+                local banned_count
+                banned_count=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned:" | awk '{print $NF}' || echo "0")
+                echo -e "Fail2ban SSH Jail: ${C_GREEN}Active${C_RESET} (${banned_count} IP(s) currently banned)"
+            else
+                echo -e "Fail2ban SSH Jail: ${C_RED}Inactive${C_RESET}"
+            fi
+
+            # Check open listening ports
+            echo -e "\n${C_BOLD}Listening Network Ports:${C_RESET}"
+            ss -tuln 2>/dev/null | grep -E 'LISTEN' | awk '{print "  " $1 "\t" $5}' || netstat -tuln 2>/dev/null | grep -E 'LISTEN' | awk '{print "  " $1 "\t" $4}'
+            ;;
+        banned)
+            if command -v fail2ban-client >/dev/null 2>&1; then
+                echo -e "${C_BOLD}Currently Banned IP Addresses (SSHD Jail):${C_RESET}"
+                fail2ban-client status sshd 2>/dev/null | grep "Banned IP list:" | sed 's/^[ \t]*Banned IP list:[ \t]*/  /' || echo "  None"
+            else
+                echo -e "${C_YELLOW}Fail2ban is not installed.${C_RESET}"
+            fi
+            ;;
+        unban)
+            require_root
+            if [ -z "$target" ]; then
+                echo -e "${C_RED}[!] Usage: serverctl security unban <ip_address>${C_RESET}"
+                exit 1
+            fi
+            fail2ban-client set sshd unbanip "$target"
+            echo -e "${C_GREEN}[✓] IP ${target} unbanned.${C_RESET}"
+            ;;
+        *)
+            echo -e "${C_RED}[!] Usage: serverctl security [audit|banned|unban <ip>]${C_RESET}"
+            ;;
+    esac
+}
+
+# Webhook Alert Setup
+cmd_notify() {
+    local action="${1:-test}"
+    mkdir -p "$CONFIG_DIR"
+
+    case "$action" in
+        setup)
+            require_root
+            echo -e "${C_BOLD}=== Webhook Alert Setup (Discord / Telegram) ===${C_RESET}"
+            read -r -p "Enter Discord Webhook URL (or press Enter to skip): " discord_url
+            read -r -p "Enter Telegram Bot Token (or press Enter to skip): " tg_token
+            read -r -p "Enter Telegram Chat ID (or press Enter to skip): " tg_chat
+
+            cat > "$NOTIFY_CONFIG" << EOF
+DISCORD_WEBHOOK="${discord_url}"
+TELEGRAM_BOT_TOKEN="${tg_token}"
+TELEGRAM_CHAT_ID="${tg_chat}"
+EOF
+            chmod 600 "$NOTIFY_CONFIG"
+            echo -e "${C_GREEN}[✓] Notification config saved to ${NOTIFY_CONFIG}.${C_RESET}"
+            ;;
+        test)
+            if [ ! -f "$NOTIFY_CONFIG" ]; then
+                echo -e "${C_YELLOW}[!] No webhook configured. Run: sudo serverctl notify setup${C_RESET}"
+                exit 0
+            fi
+            # shellcheck source=/dev/null
+            source "$NOTIFY_CONFIG"
+            local msg="[server-my-pc] Test alert from $(hostname) at $(date '+%Y-%m-%d %H:%M:%S'). Server is ONLINE and 24/7 active."
+            if [ -n "$DISCORD_WEBHOOK" ]; then
+                curl -s -H "Content-Type: application/json" -X POST -d "{\"content\": \"$msg\"}" "$DISCORD_WEBHOOK" >/dev/null && echo -e "${C_GREEN}[✓] Discord alert sent!${C_RESET}"
+            fi
+            if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+                curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d "chat_id=${TELEGRAM_CHAT_ID}&text=${msg}" >/dev/null && echo -e "${C_GREEN}[✓] Telegram alert sent!${C_RESET}"
+            fi
+            ;;
+        *)
+            echo -e "${C_RED}[!] Usage: serverctl notify [setup|test]${C_RESET}"
+            ;;
+    esac
+}
+
+# Network Speedtest
+cmd_speedtest() {
+    echo -e "${C_CYAN}[*] Measuring server network latency and download speed...${C_RESET}"
+    local ping_ms
+    ping_ms=$(ping -c 3 1.1.1.1 2>/dev/null | tail -1 | awk -F '/' '{print $5}' || echo "N/A")
+    echo -e "Ping to Cloudflare DNS (1.1.1.1): ${C_GREEN}${ping_ms} ms${C_RESET}"
+
+    if command -v speedtest >/dev/null 2>&1; then
+        speedtest
+    elif command -v speedtest-cli >/dev/null 2>&1; then
+        speedtest-cli --simple
+    else
+        echo -e "${C_CYAN}[*] Testing raw download speed via fast CDN...${C_RESET}"
+        curl -s -w 'Downloaded: %{size_download} bytes in %{time_total} seconds (%{speed_download} bytes/sec)\n' -o /dev/null https://speed.cloudflare.com/__down?bytes=25000000 || echo "Speedtest unavailable."
+    fi
+}
+
+# Logs Viewer
+cmd_logs() {
+    local target="${1:-ssh}"
+    case "$target" in
+        ssh)
+            journalctl -u ssh -u sshd -n 50 -f 2>/dev/null || tail -n 50 -f /var/log/auth.log 2>/dev/null || tail -n 50 -f /var/log/secure
+            ;;
+        fail2ban)
+            journalctl -u fail2ban -n 50 -f 2>/dev/null || tail -n 50 -f /var/log/fail2ban.log
+            ;;
+        watchdog)
+            journalctl -u server-watchdog -n 50 -f
+            ;;
+        thermal)
+            journalctl -u server-thermal-guard -n 50 -f
+            ;;
+        *)
+            echo -e "${C_RED}[!] Usage: serverctl logs [ssh|fail2ban|watchdog|thermal]${C_RESET}"
+            ;;
+    esac
+}
+
+# Full Uninstaller & System Restoration
+cmd_uninstall() {
+    require_root
+    echo -e "${C_RED}${C_BOLD}"
+    echo "=================================================================="
+    echo "       SERVER-MY-PC UNINSTALLER & SYSTEM RESTORATION              "
+    echo "=================================================================="
+    echo -e "${C_RESET}"
+    read -r -p "Are you sure you want to revert power/lid settings and uninstall server-my-pc? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        echo -e "${C_YELLOW}[*] Uninstall cancelled.${C_RESET}"
+        exit 0
+    fi
+
+    echo -e "${C_CYAN}[*] Unmasking systemd power and sleep targets...${C_RESET}"
+    systemctl unmask sleep.target suspend.target hibernate.target hybrid-sleep.target >/dev/null 2>&1 || true
+
+    echo -e "${C_CYAN}[*] Removing 24/7 lid-close override and restoring normal laptop sleep...${C_RESET}"
+    rm -f /etc/systemd/logind.conf.d/99-server-my-pc.conf
+    systemctl restart systemd-logind 2>/dev/null || systemctl kill -s HUP systemd-logind 2>/dev/null || true
+
+    echo -e "${C_CYAN}[*] Stopping and disabling watchdog and thermal daemons...${C_RESET}"
+    systemctl disable --now server-watchdog.timer server-watchdog.service server-thermal-guard.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/server-watchdog.* /etc/systemd/system/server-thermal-guard.*
+    rm -f /usr/local/bin/server-watchdog /usr/local/bin/server-thermal-guard
+
+    echo -e "${C_CYAN}[*] Removing custom sysctl tuning...${C_RESET}"
+    rm -f /etc/sysctl.d/99-server-my-pc.conf
+    sysctl --system >/dev/null 2>&1 || true
+
+    echo -e "${C_CYAN}[*] Cleaning up configuration directory...${C_RESET}"
+    rm -rf "$CONFIG_DIR"
+
+    echo -e "${C_GREEN}[✓] System successfully reverted to normal laptop/desktop defaults!${C_RESET}"
+    echo -e "${C_DIM}Note: OpenSSH, Docker, and Cockpit were left installed so you don't lose apps. You can remove them with your package manager if desired.${C_RESET}"
+    rm -f /usr/local/bin/serverctl /usr/local/bin/server-my-pc
+}
+
+# Help Menu
+cmd_help() {
+    show_banner
+    echo -e "${C_BOLD}USAGE:${C_RESET}"
+    echo -e "  serverctl <command> [arguments]\n"
+    echo -e "${C_BOLD}CORE COMMANDS:${C_RESET}"
+    printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "status" "Print full server telemetry, resources, IP, and service health"
+    printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "dashboard" "Launch live real-time interactive terminal dashboard (TUI)"
+    printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "info" "Show detailed connection commands, SSH, Cockpit URL & port guide"
+    printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "open-port <port> [proto]" "Open port in firewall (UFW/firewalld) and request router UPnP"
+    printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "close-port <port> [proto]" "Close port in firewall and remove UPnP forward"
+    printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "apps [list|install|remove]" "1-click Docker app deployer (Portainer, Nginx Proxy, FileBrowser, etc.)"
+    printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "tunnel [start|stop|status]" "Zero-signup CGNAT encrypted tunnel fallback (bypass strict routers)"
+    printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "lid [ignore|normal|status]" "Toggle 24/7 lid-close override on/off"
+    printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "battery [status|limit <%>]" "Check battery health and set max charging limit (80% protection)"
+    printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "security [audit|banned|unban]" "Run security audit or manage Fail2ban bans"
+    printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "notify [setup|test]" "Configure Discord/Telegram alert webhooks on boot/IP changes"
+    printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "speedtest" "Run network latency and download speed measurement"
+    printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "logs [ssh|fail2ban|...]" "Live tail auth, fail2ban, watchdog, or thermal logs"
+    printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "uninstall" "Revert power settings, unmask sleep, and restore normal PC state"
+    printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "help" "Display this reference guide"
+    echo ""
+}
+
+# Main Command Dispatcher
+case "$1" in
+    status|"")
+        cmd_status
+        ;;
+    dashboard|top|tui)
+        cmd_dashboard
+        ;;
+    info|connect)
+        cmd_info
+        ;;
+    open-port|allow)
+        shift
+        cmd_open_port "$@"
+        ;;
+    close-port|deny)
+        shift
+        cmd_close_port "$@"
+        ;;
+    apps|app)
+        shift
+        cmd_apps "$@"
+        ;;
+    tunnel)
+        shift
+        cmd_tunnel "$@"
+        ;;
+    lid)
+        shift
+        cmd_lid "$@"
+        ;;
+    battery|bat)
+        shift
+        cmd_battery "$@"
+        ;;
+    security|sec)
+        shift
+        cmd_security "$@"
+        ;;
+    notify|alert)
+        shift
+        cmd_notify "$@"
+        ;;
+    speedtest|speed)
+        cmd_speedtest
+        ;;
+    logs|log)
+        shift
+        cmd_logs "$@"
+        ;;
+    uninstall|revert)
+        cmd_uninstall
+        ;;
+    help|--help|-h)
+        cmd_help
+        ;;
+    version|--version|-v)
+        echo "serverctl v${VERSION}"
+        ;;
+    *)
+        echo -e "${C_RED}[!] Unknown command: $1${C_RESET}"
+        echo -e "Run: ${C_CYAN}serverctl help${C_RESET} for available commands."
+        exit 1
+        ;;
+esac

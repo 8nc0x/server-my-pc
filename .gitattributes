@@ -1,0 +1,6 @@
+# Ensure bash scripts always use Linux LF line endings
+*.sh text eol=lf
+serverctl text eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.md text eol=lf

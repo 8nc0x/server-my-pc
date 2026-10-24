@@ -1,0 +1,12 @@
+# Logs & scratch
+*.log
+*.tmp
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Environment & local configs
+.env
+notify.conf
+*.bak
