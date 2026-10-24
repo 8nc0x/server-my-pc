@@ -72,8 +72,9 @@ sudo bash setup.sh
 |---|---|
 | **🔌 24/7 Lid-Close Always-On** | Overrides `systemd-logind` and power policies. Shut your laptop lid and the server stays 100% running with zero sleep or screen blanking lockups. |
 | **🛡️ OpenSSH Ready & Hardened** | Pre-configures OpenSSH Server, disables empty passwords, keeps idle connections alive, and enables key-based or password auth. |
+| **🌐 Tailscale Mesh VPN (Zero-Config Remote Access)** | Installs [Tailscale](https://tailscale.com) and connects your server to a private mesh network. SSH from anywhere in the world via `ssh user@100.x.x.x` — works 100% through CGNAT, strict firewalls, and mobile hotspots with zero router config. |
 | **👑 Full User Sudo Rights** | Grants your specified server user full administrative passwordless `sudo` privileges. |
-| **🧱 Firewall & Fail2ban Defense** | Configures UFW/firewalld with default-deny inbound, allows SSH and web dashboard ports, and blocks brute-force attackers via Fail2ban. |
+| **🧱 Firewall & Fail2ban Defense** | Configures UFW/firewalld with default-deny inbound, allows SSH, Tailscale mesh, and web dashboard ports, and blocks brute-force attackers via Fail2ban. |
 | **🌐 Automatic Router UPnP Port Forward** | Uses standard UPnP protocol to automatically forward SSH and Dashboard ports on your home Wi-Fi router without manual router login. |
 | **🛰️ Zero-Signup CGNAT Tunnel Fallback** | Stuck behind strict mobile hotspot or ISP CGNAT where port forwarding is blocked? Run `serverctl tunnel start` for an immediate, free, encrypted public endpoint with zero accounts needed. |
 | **💻 Cockpit Web Dashboard** | Gives you an instant browser-based server control panel and root terminal at `https://<server-ip>:9090` without needing an SSH client. |
@@ -111,6 +112,8 @@ sudo bash setup.sh --preset hardened
 | `-y, --yes` | Run non-interactively without confirmation prompts |
 | `--ssh-port <port>` | Configure a custom SSH port (e.g. `--ssh-port 2222`) |
 | `--user <username>` | Specify target user for server administration |
+| `--tailscale-key <key>` | Connect to Tailscale using a pre-authenticated auth key (non-interactive) |
+| `--no-tailscale` | Skip Tailscale mesh VPN installation (LAN/WAN only) |
 | `--no-docker` | Skip Docker Engine installation |
 | `--no-cockpit` | Skip Cockpit Web Console installation |
 | `--no-upnp` | Skip automatic router UPnP port forwarding |
@@ -135,6 +138,15 @@ serverctl dashboard
 
 # Print ready-to-copy SSH commands, IP addresses, and Cockpit URL
 serverctl info
+
+# Tailscale Mesh VPN Management (★ 100% Reliable Remote Access)
+serverctl tailscale status          # View mesh IP, daemon status, and peers
+sudo serverctl tailscale login      # Authenticate/connect to Tailscale mesh
+sudo serverctl tailscale login tskey-auth-xxx  # Connect with pre-auth key
+serverctl tailscale ip              # Print mesh IP only (for scripting)
+serverctl tailscale peers           # List all connected mesh devices
+sudo serverctl tailscale logout     # Disconnect from mesh
+sudo serverctl tailscale restart    # Restart the Tailscale daemon
 
 # Open/Close firewall ports and trigger router UPnP
 sudo serverctl open-port 8080 tcp
@@ -226,25 +238,41 @@ When `setup.sh` finishes, it outputs your exact connection commands:
 ```text
 ┌── 24/7 SERVER CONNECTION DETAILS ──────────────────────────────────────────┐
 │  Local Network IP (LAN)  : 192.168.1.50                                    │
+│  Tailscale Mesh IP       : 100.64.0.7 (24/7 Mesh Online)                   │
 │  Public Internet IP (WAN): 103.x.x.x                                       │
 │  SSH Port                : 22                                              │
 │  Server User             : owner                                           │
 ├── READY-TO-COPY SSH COMMANDS ──────────────────────────────────────────────┤
 │  Same Home WiFi (LAN)    : ssh owner@192.168.1.50                          │
-│  Outside via WAN IP      : ssh owner@103.x.x.x                             │
+│  Remote via Tailscale    : ssh owner@100.64.0.7    ★ Works 100% Anywhere   │
+│  Outside via Router WAN  : ssh owner@103.x.x.x                             │
+│  * Note: Tailscale connects 100% reliably anywhere without router setup!   │
 ├── WEB MANAGEMENT CONSOLE (COCKPIT) ────────────────────────────────────────┤
-│  Web Terminal & Admin    : https://192.168.1.50:9090                       │
+│  Local LAN Admin         : https://192.168.1.50:9090                       │
+│  Remote Mesh Admin       : https://100.64.0.7:9090                         │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
 > [!IMPORTANT]
 > **Getting `ssh: connect to host ... port 22: Connection timed out`?**
 > - **If you are on the SAME Wi-Fi as your server:** You **must** use the **LAN IP** (`ssh user@192.168.1.x`). Home Wi-Fi routers block connections trying to loop back to their own Public IP (NAT loopback prevention).
-> - **If connecting from OUTSIDE across the internet:** Most home ISPs/routers block incoming port 22 by default unless you forward port 22 on your router or start a zero-config tunnel below.
+> - **If connecting from OUTSIDE across the internet:** Use the **Tailscale Mesh IP** (`ssh user@100.x.x.x`) — this works everywhere, regardless of router/ISP restrictions.
 
 ### Accessing From Anywhere (Outside Home WiFi)
 
-1. **Option A: Zero-Config Remote Tunnel (Works 100% Anywhere - No Router Setup Needed)**
+1. **Option A: Tailscale Mesh VPN (★ Recommended — Works 100% Anywhere, Zero-Config)**
+   - Tailscale is **installed and configured automatically** during setup. Just open the login link printed during install, or run:
+     ```bash
+     sudo serverctl tailscale login
+     ```
+   - On your **client device** (laptop, phone), install Tailscale from [tailscale.com/download](https://tailscale.com/download) and log in with the same account.
+   - Connect via your server's Tailscale Mesh IP:
+     ```bash
+     ssh owner@100.64.0.7
+     ```
+   - This works through CGNAT, strict firewalls, mobile hotspots, and corporate networks — no router port forwarding needed.
+
+2. **Option B: Zero-Config Remote Tunnel (No Accounts Needed)**
    - On the server machine, simply run:
      ```bash
      sudo serverctl tunnel start
@@ -255,10 +283,10 @@ When `setup.sh` finishes, it outputs your exact connection commands:
      ```
    - You can copy and run that command directly on any Windows CMD/PowerShell, Mac, or Linux from anywhere in the world! It automatically restarts and stays persistent across reboots.
 
-2. **Option B: Automatic Router UPnP (Default)**
+3. **Option C: Automatic Router UPnP (Default)**
    - `setup.sh` automatically attempts to open port 22 on your router via UPnP. If your router supports UPnP, `ssh user@PUBLIC_IP` will work directly.
 
-3. **Option C: Manual Router Port Forwarding**
+4. **Option D: Manual Router Port Forwarding**
    - Open your router admin page (e.g. `http://192.168.1.1` or `192.168.0.1`).
    - Go to **Port Forwarding / Virtual Servers**.
    - Forward **Port 22 (TCP)** to your server's Local IP (`192.168.1.x`).

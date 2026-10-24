@@ -27,7 +27,7 @@ C_WHITE="\033[38;5;231m"
 C_GRAY="\033[38;5;244m"
 
 # Default Configuration
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 PRESET="standard"
 SSH_PORT="22"
 TARGET_USER="${SUDO_USER:-$USER}"
@@ -35,7 +35,9 @@ TARGET_USER="${SUDO_USER:-$USER}"
 NON_INTERACTIVE=false
 INSTALL_DOCKER=true
 INSTALL_COCKPIT=true
+INSTALL_TAILSCALE=true
 ENABLE_UPNP=true
+TAILSCALE_KEY=""
 CONFIG_DIR="/etc/server-my-pc"
 CUSTOM_PASSWORD=""
 SSH_PUBKEY=""
@@ -93,6 +95,8 @@ show_help() {
     echo -e "  ${C_CYAN}--user <username>${C_RESET}    Specify target server username (default: ${TARGET_USER})"
     echo -e "  ${C_CYAN}--password <pass>${C_RESET}    Set SSH login password non-interactively"
     echo -e "  ${C_CYAN}--ssh-key \"<key>\"${C_RESET}    Inject client SSH public key for passwordless login"
+    echo -e "  ${C_CYAN}--tailscale-key <k>${C_RESET}  Connect to Tailscale mesh using pre-authenticated auth key"
+    echo -e "  ${C_CYAN}--no-tailscale${C_RESET}       Skip Tailscale installation (use direct LAN/WAN only)"
     echo -e "  ${C_CYAN}--no-docker${C_RESET}          Do not install Docker Engine"
     echo -e "  ${C_CYAN}--no-cockpit${C_RESET}         Do not install Cockpit Web Console"
     echo -e "  ${C_CYAN}--no-upnp${C_RESET}            Skip automatic router UPnP port forwarding"
@@ -175,6 +179,14 @@ parse_args() {
             --ssh-key)
                 SSH_PUBKEY="$2"
                 shift 2
+                ;;
+            --tailscale-key|--ts-key)
+                TAILSCALE_KEY="$2"
+                shift 2
+                ;;
+            --no-tailscale)
+                INSTALL_TAILSCALE=false
+                shift
                 ;;
             --no-docker)
                 INSTALL_DOCKER=false
@@ -689,34 +701,38 @@ configure_firewall_and_security() {
         ufw default allow outgoing >/dev/null 2>&1 || true
         ufw allow "${SSH_PORT}/tcp" comment "SSH Server" >/dev/null 2>&1 || true
         [ "${SSH_PORT}" -ne 22 ] && ufw allow 22/tcp comment "SSH Default" >/dev/null 2>&1 || true
-        # Always allow entire local LAN subnets
+        # Always allow entire local LAN subnets and Tailscale mesh
         ufw allow from 192.168.0.0/16 to any port "${SSH_PORT}" proto tcp >/dev/null 2>&1 || true
         ufw allow from 10.0.0.0/8 to any port "${SSH_PORT}" proto tcp >/dev/null 2>&1 || true
         ufw allow from 172.16.0.0/12 to any port "${SSH_PORT}" proto tcp >/dev/null 2>&1 || true
+        ufw allow in on tailscale0 to any comment "Tailscale Mesh VPN" >/dev/null 2>&1 || true
         if [ "$INSTALL_COCKPIT" = true ]; then
             ufw allow 9090/tcp comment "Cockpit Web Console" >/dev/null 2>&1 || true
         fi
         echo "y" | ufw enable >/dev/null 2>&1 || true
-        success "UFW firewall active: Port ${SSH_PORT} (SSH) and LAN subnets unconditionally allowed."
+        success "UFW firewall active: Port ${SSH_PORT} (SSH), LAN subnets, and Tailscale mesh allowed."
     elif command -v firewall-cmd >/dev/null 2>&1; then
         systemctl enable --now firewalld >/dev/null 2>&1 || true
         firewall-cmd --permanent --add-port="${SSH_PORT}/tcp" >/dev/null 2>&1 || true
         firewall-cmd --permanent --add-service=ssh >/dev/null 2>&1 || true
+        firewall-cmd --permanent --zone=trusted --add-interface=tailscale0 >/dev/null 2>&1 || true
         if [ "$INSTALL_COCKPIT" = true ]; then
             firewall-cmd --permanent --add-port=9090/tcp >/dev/null 2>&1 || true
         fi
         firewall-cmd --reload >/dev/null 2>&1 || true
-        success "firewalld active: Port ${SSH_PORT} (SSH) allowed."
+        success "firewalld active: Port ${SSH_PORT} (SSH) and Tailscale allowed."
     fi
 
     # Raw iptables safety net (guarantees packet acceptance at kernel level)
     if command -v iptables >/dev/null 2>&1; then
         iptables -I INPUT 1 -p tcp --dport "${SSH_PORT}" -j ACCEPT 2>/dev/null || true
+        iptables -I INPUT 1 -i tailscale0 -j ACCEPT 2>/dev/null || true
         iptables -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
         iptables -I INPUT 1 -i lo -j ACCEPT 2>/dev/null || true
     fi
     if command -v ip6tables >/dev/null 2>&1; then
         ip6tables -I INPUT 1 -p tcp --dport "${SSH_PORT}" -j ACCEPT 2>/dev/null || true
+        ip6tables -I INPUT 1 -i tailscale0 -j ACCEPT 2>/dev/null || true
     fi
 
     # Fail2ban SSH Jail Configuration
@@ -959,6 +975,121 @@ install_docker() {
     success "Docker Engine active and ready for container deployments."
 }
 
+# Install & Configure Tailscale Mesh VPN (Zero-Config 24/7 Remote Access)
+install_and_configure_tailscale() {
+    if [ "$INSTALL_TAILSCALE" = false ]; then
+        info "Skipping Tailscale installation (--no-tailscale)."
+        return 0
+    fi
+
+    step "Setting Up Tailscale Mesh VPN (Zero-Config 24/7 Remote Access)"
+
+    if ! command -v tailscale >/dev/null 2>&1; then
+        info "Installing Tailscale via official fast installer..."
+        curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1 || {
+            warn "Official install.sh failed, falling back to distro package manager..."
+            case "$PKG_MGR" in
+                apt)
+                    export DEBIAN_FRONTEND=noninteractive
+                    curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.noarmor.gpg | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null 2>&1 || true
+                    apt-get update -qq >/dev/null 2>&1 || true
+                    apt-get install -y -qq tailscale >/dev/null 2>&1 || true
+                    ;;
+                dnf|yum)
+                    dnf install -y -q tailscale >/dev/null 2>&1 || yum install -y -q tailscale >/dev/null 2>&1 || true
+                    ;;
+                pacman)
+                    pacman -Sy --noconfirm --needed tailscale >/dev/null 2>&1 || true
+                    ;;
+                zypper)
+                    zypper --non-interactive install -y tailscale >/dev/null 2>&1 || true
+                    ;;
+                apk)
+                    apk add --no-cache tailscale >/dev/null 2>&1 || true
+                    ;;
+            esac
+        }
+    fi
+
+    if ! command -v tailscale >/dev/null 2>&1; then
+        warn "Could not install Tailscale automatically. Continuing setup."
+        return 0
+    fi
+
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable --now tailscaled >/dev/null 2>&1 || service tailscaled start >/dev/null 2>&1 || true
+    success "Tailscale daemon (tailscaled) active and enabled on boot."
+
+    # Check if already authenticated and connected
+    local existing_ip
+    existing_ip=$(tailscale ip -4 2>/dev/null || true)
+    if [ -n "$existing_ip" ]; then
+        success "Tailscale is already authenticated and connected! (Mesh IP: ${C_GREEN}${C_BOLD}${existing_ip}${C_RESET})"
+        return 0
+    fi
+
+    # Connect to Tailscale
+    local up_flags="--ssh --accept-routes"
+    if [ -n "$TAILSCALE_KEY" ]; then
+        info "Authenticating Tailscale using provided auth key..."
+        tailscale up --authkey="$TAILSCALE_KEY" ${up_flags} >/dev/null 2>&1
+        local ts_ip
+        ts_ip=$(tailscale ip -4 2>/dev/null || true)
+        if [ -n "$ts_ip" ]; then
+            success "Tailscale authenticated! Static Mesh IP: ${C_GREEN}${C_BOLD}${ts_ip}${C_RESET}"
+        else
+            warn "Tailscale auth key was not accepted. Run 'sudo tailscale up --ssh' manually to link."
+        fi
+    elif [ "$NON_INTERACTIVE" = true ] || [ ! -t 0 ]; then
+        info "Initiating Tailscale login session..."
+        local auth_log="/tmp/tailscale-auth.log"
+        rm -f "$auth_log"
+        nohup tailscale up ${up_flags} --reset > "$auth_log" 2>&1 &
+
+        local auth_url=""
+        for i in {1..12}; do
+            sleep 1
+            auth_url=$(grep -oE 'https://login\.tailscale\.com/a/[a-zA-Z0-9]+' "$auth_log" 2>/dev/null | head -n1 || echo "")
+            [ -n "$auth_url" ] && break
+        done
+
+        if [ -n "$auth_url" ]; then
+            echo -e "\n${C_GREEN}${C_BOLD}  ┌── TAILSCALE ZERO-CONFIG LOGIN LINK ────────────────────────────────────┐${C_RESET}"
+            echo -e "  │  ${C_WHITE}Click or open this link in any browser to authorize remote access:      ${C_RESET}│"
+            echo -e "  │  ${C_CYAN}${C_BOLD}${auth_url}${C_RESET}"
+            echo -e "  └────────────────────────────────────────────────────────────────────────┘\n"
+            info "Waiting up to 45s for browser authorization (or complete anytime later)..."
+            local authenticated=false
+            for i in {1..45}; do
+                sleep 1
+                if tailscale ip -4 >/dev/null 2>&1; then
+                    authenticated=true
+                    break
+                fi
+            done
+            if [ "$authenticated" = true ]; then
+                local ts_ip
+                ts_ip=$(tailscale ip -4 2>/dev/null)
+                success "Tailscale authenticated! Static Mesh IP: ${C_GREEN}${C_BOLD}${ts_ip}${C_RESET}"
+            else
+                info "Authentication can be finished anytime! Just open the URL above or run:"
+                echo -e "  ${C_CYAN}sudo tailscale up --ssh${C_RESET}"
+            fi
+        else
+            info "Tailscale installed. Link this machine anytime by running: ${C_CYAN}sudo tailscale up --ssh${C_RESET}"
+        fi
+    else
+        echo -e "\n${C_CYAN}${C_BOLD}[*] Linking server to your Tailscale mesh network...${C_RESET}"
+        info "Running: tailscale up --ssh --accept-routes"
+        tailscale up ${up_flags} --reset || true
+        local ts_ip
+        ts_ip=$(tailscale ip -4 2>/dev/null || true)
+        if [ -n "$ts_ip" ]; then
+            success "Tailscale authenticated! Static Mesh IP: ${C_GREEN}${C_BOLD}${ts_ip}${C_RESET}"
+        fi
+    fi
+}
+
 # UPnP Router Port Forwarding
 attempt_upnp_port_forward() {
     if [ "$ENABLE_UPNP" = false ]; then
@@ -1005,12 +1136,19 @@ install_serverctl() {
 
 # Display Final Summary Card
 display_completion_summary() {
-    local local_ip public_ip
+    local local_ip public_ip ts_ip ts_display
     local_ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
     [ -z "$local_ip" ] && local_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
     [ -z "$local_ip" ] && local_ip="127.0.0.1"
 
     public_ip=$(curl -s --max-time 2 https://api.ipify.org 2>/dev/null || curl -s --max-time 2 https://ifconfig.me 2>/dev/null || echo "Unknown/Offline")
+
+    ts_ip=$(tailscale ip -4 2>/dev/null || echo "")
+    if [ -n "$ts_ip" ]; then
+        ts_display="${ts_ip} (24/7 Mesh Online)"
+    else
+        ts_display="Not linked (Run: sudo tailscale up)"
+    fi
 
     echo -e "\n${C_GREEN}${C_BOLD}"
     cat << "EOF"
@@ -1021,6 +1159,7 @@ EOF
     echo -e "${C_RESET}"
     echo -e "${C_WHITE}${C_BOLD}┌── 24/7 SERVER CONNECTION DETAILS ──────────────────────────────────────────┐${C_RESET}"
     printf "${C_WHITE}│  %-24s: ${C_GREEN}%-45s${C_WHITE}│\n" "Local Network IP (LAN)" "$local_ip"
+    printf "${C_WHITE}│  %-24s: ${C_CYAN}%-45s${C_WHITE}│\n" "Tailscale Mesh IP" "$ts_display"
     printf "${C_WHITE}│  %-24s: ${C_YELLOW}%-45s${C_WHITE}│\n" "Public Internet IP (WAN)" "$public_ip"
     printf "${C_WHITE}│  %-24s: ${C_CYAN}%-45s${C_WHITE}│\n" "SSH Port" "$SSH_PORT"
     printf "${C_WHITE}│  %-24s: ${C_MAGENTA}%-45s${C_WHITE}│\n" "SSH Username" "$TARGET_USER"
@@ -1028,22 +1167,35 @@ EOF
     echo -e "${C_WHITE}├── READY-TO-COPY SSH COMMANDS ──────────────────────────────────────────────┤${C_RESET}"
     if [ "$SSH_PORT" -eq 22 ]; then
         printf "${C_WHITE}│  %-24s: ${C_GREEN}%-45s${C_WHITE}│\n" "Same Home WiFi (LAN)" "ssh ${TARGET_USER}@${local_ip}"
-        printf "${C_WHITE}│  %-24s: ${C_YELLOW}%-45s${C_WHITE}│\n" "Outside via WAN IP" "ssh ${TARGET_USER}@${public_ip}"
+        if [ -n "$ts_ip" ]; then
+            printf "${C_WHITE}│  %-24s: ${C_CYAN}${C_BOLD}%-45s${C_WHITE}│\n" "Remote via Tailscale" "ssh ${TARGET_USER}@${ts_ip}"
+        else
+            printf "${C_WHITE}│  %-24s: ${C_CYAN}%-45s${C_WHITE}│\n" "Remote via Tailscale" "sudo tailscale up --ssh (Link machine)"
+        fi
+        printf "${C_WHITE}│  %-24s: ${C_YELLOW}%-45s${C_WHITE}│\n" "Outside via Router WAN" "ssh ${TARGET_USER}@${public_ip}"
     else
         printf "${C_WHITE}│  %-24s: ${C_GREEN}%-45s${C_WHITE}│\n" "Same Home WiFi (LAN)" "ssh -p ${SSH_PORT} ${TARGET_USER}@${local_ip}"
-        printf "${C_WHITE}│  %-24s: ${C_YELLOW}%-45s${C_WHITE}│\n" "Outside via WAN IP" "ssh -p ${SSH_PORT} ${TARGET_USER}@${public_ip}"
+        if [ -n "$ts_ip" ]; then
+            printf "${C_WHITE}│  %-24s: ${C_CYAN}${C_BOLD}%-45s${C_WHITE}│\n" "Remote via Tailscale" "ssh -p ${SSH_PORT} ${TARGET_USER}@${ts_ip}"
+        else
+            printf "${C_WHITE}│  %-24s: ${C_CYAN}%-45s${C_WHITE}│\n" "Remote via Tailscale" "sudo tailscale up --ssh (Link machine)"
+        fi
+        printf "${C_WHITE}│  %-24s: ${C_YELLOW}%-45s${C_WHITE}│\n" "Outside via Router WAN" "ssh -p ${SSH_PORT} ${TARGET_USER}@${public_ip}"
     fi
-    echo -e "${C_WHITE}│  ${C_YELLOW}${C_BOLD}* Note: If both devices are on same Wi-Fi, ALWAYS use LAN IP!${C_RESET}             ${C_WHITE}│"
+    echo -e "${C_WHITE}│  ${C_YELLOW}${C_BOLD}* Note: Tailscale connects 100% reliably anywhere without router setup!${C_RESET}   ${C_WHITE}│"
     if [ "$INSTALL_COCKPIT" = true ]; then
         echo -e "${C_WHITE}├── WEB MANAGEMENT CONSOLE (COCKPIT) ────────────────────────────────────────┤${C_RESET}"
-        printf "${C_WHITE}│  %-24s: ${C_BLUE}%-45s${C_WHITE}│\n" "Web Terminal & Admin" "https://${local_ip}:9090"
+        printf "${C_WHITE}│  %-24s: ${C_BLUE}%-45s${C_WHITE}│\n" "Local LAN Admin" "https://${local_ip}:9090"
+        if [ -n "$ts_ip" ]; then
+            printf "${C_WHITE}│  %-24s: ${C_BLUE}%-45s${C_WHITE}│\n" "Remote Mesh Admin" "https://${ts_ip}:9090"
+        fi
         printf "${C_WHITE}│  %-24s: ${C_GRAY}%-45s${C_WHITE}│\n" "Login Credentials" "Same as your Linux user (${TARGET_USER})"
     fi
     echo -e "${C_WHITE}├── QUICK SERVER MANAGEMENT COMMANDS ────────────────────────────────────────┤${C_RESET}"
     printf "${C_WHITE}│  ${C_CYAN}%-26s${C_WHITE} : %-43s│\n" "serverctl verify" "Run full diagnostic check of SSH, firewall & ports"
+    printf "${C_WHITE}│  ${C_CYAN}%-26s${C_WHITE} : %-43s│\n" "serverctl tailscale" "Manage Tailscale mesh IP, status, and login"
     printf "${C_WHITE}│  ${C_CYAN}%-26s${C_WHITE} : %-43s│\n" "serverctl status" "View full hardware & network telemetry"
     printf "${C_WHITE}│  ${C_CYAN}%-26s${C_WHITE} : %-43s│\n" "serverctl dashboard" "Open real-time interactive terminal TUI"
-    printf "${C_WHITE}│  ${C_CYAN}%-26s${C_WHITE} : %-43s│\n" "serverctl tunnel start" "Start zero-signup CGNAT remote tunnel"
     printf "${C_WHITE}│  ${C_CYAN}%-26s${C_WHITE} : %-43s│\n" "serverctl apps list" "1-click deploy Portainer, Nginx, etc."
     printf "${C_WHITE}│  ${C_CYAN}%-26s${C_WHITE} : %-43s│\n" "serverctl uninstall" "Restore laptop to standard defaults"
     echo -e "${C_WHITE}└────────────────────────────────────────────────────────────────────────────┘${C_RESET}\n"
@@ -1074,6 +1226,7 @@ main() {
     install_self_healing_daemons
     install_cockpit
     install_docker
+    install_and_configure_tailscale
     install_serverctl
     attempt_upnp_port_forward
     display_completion_summary

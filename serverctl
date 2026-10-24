@@ -153,22 +153,31 @@ cmd_status() {
     printf "${C_WHITE}│  %-24s: ${C_GREEN}%-45s${C_WHITE}│\n" "Installed Preset" "$preset"
     echo -e "${C_WHITE}├── 24/7 NETWORK & CONNECTIVITY ─────────────────────────────────────────────┤${C_RESET}"
     printf "${C_WHITE}│  %-24s: ${C_GREEN}%-45s${C_WHITE}│\n" "Local LAN IP" "$local_ip"
+    local ts_ip
+    ts_ip=$(tailscale ip -4 2>/dev/null || echo "")
+    if [ -n "$ts_ip" ]; then
+        printf "${C_WHITE}│  %-24s: ${C_CYAN}%-45s${C_WHITE}│\n" "Tailscale Mesh IP" "$ts_ip (24/7 Mesh Online)"
+        printf "${C_WHITE}│  %-24s: ${C_CYAN}%-45s${C_WHITE}│\n" "SSH via Tailscale" "ssh $(whoami)@$ts_ip"
+    else
+        printf "${C_WHITE}│  %-24s: ${C_GRAY}%-45s${C_WHITE}│\n" "Tailscale Mesh IP" "Offline (sudo serverctl tailscale login)"
+    fi
     printf "${C_WHITE}│  %-24s: ${C_YELLOW}%-45s${C_WHITE}│\n" "Public WAN IP" "$public_ip"
-    printf "${C_WHITE}│  %-24s: ${C_CYAN}%-45s${C_WHITE}│\n" "SSH Connection (Local)" "ssh $(whoami)@$local_ip"
-    printf "${C_WHITE}│  %-24s: ${C_MAGENTA}%-45s${C_WHITE}│\n" "SSH Connection (Public)" "ssh $(whoami)@$public_ip"
+    printf "${C_WHITE}│  %-24s: ${C_GREEN}%-45s${C_WHITE}│\n" "SSH via Local Wi-Fi" "ssh $(whoami)@$local_ip"
     if systemctl is-active --quiet cockpit.socket 2>/dev/null; then
         printf "${C_WHITE}│  %-24s: ${C_BLUE}%-45s${C_WHITE}│\n" "Cockpit Web Console" "https://$local_ip:9090"
     fi
     echo -e "${C_WHITE}├── CORE SERVICES HEALTH ────────────────────────────────────────────────────┤${C_RESET}"
     
-    local ssh_status fail2ban_status watchdog_status thermal_status docker_status
+    local ssh_status fail2ban_status watchdog_status thermal_status docker_status tailscale_status
     ssh_status=$(check_service ssh || check_service sshd)
     fail2ban_status=$(check_service fail2ban)
     watchdog_status=$(check_service server-watchdog.timer || check_service server-watchdog)
     thermal_status=$(check_service server-thermal-guard)
     docker_status=$(check_service docker)
+    tailscale_status=$(check_service tailscaled)
 
     printf "${C_WHITE}│  %-24s: %-54s${C_WHITE}│\n" "OpenSSH Server" "$ssh_status"
+    printf "${C_WHITE}│  %-24s: %-54s${C_WHITE}│\n" "Tailscale Mesh Daemon" "$tailscale_status"
     printf "${C_WHITE}│  %-24s: %-54s${C_WHITE}│\n" "Fail2ban Defense" "$fail2ban_status"
     printf "${C_WHITE}│  %-24s: %-54s${C_WHITE}│\n" "Network Watchdog" "$watchdog_status"
     printf "${C_WHITE}│  %-24s: %-54s${C_WHITE}│\n" "Thermal Guard" "$thermal_status"
@@ -209,14 +218,29 @@ cmd_info() {
         echo -e "   ${C_GREEN}${C_BOLD}ssh -p ${ssh_port} ${user}@${local_ip}${C_RESET}  ${C_BOLD}${C_WHITE}(← USE THIS if your client PC is on the same Wi-Fi!)${C_RESET}"
     fi
 
-    echo -e "\n${C_BOLD}2. Outside / Remote Internet Access (Public WAN IP):${C_RESET}"
-    if [ "$ssh_port" -eq 22 ]; then
-        echo -e "   ${C_YELLOW}ssh ${user}@${public_ip}${C_RESET}  ${C_DIM}(Requires Port 22 forwarded on your router or active tunnel)${C_RESET}"
+    local ts_ip
+    ts_ip=$(tailscale ip -4 2>/dev/null || echo "")
+    if [ -n "$ts_ip" ]; then
+        echo -e "\n${C_BOLD}2. Remote via Tailscale Mesh (★ 100% Guaranteed Anywhere, Zero-Router Setup):${C_RESET}"
+        if [ "$ssh_port" -eq 22 ]; then
+            echo -e "   ${C_CYAN}${C_BOLD}ssh ${user}@${ts_ip}${C_RESET}  ${C_GREEN}(● Mesh Active & Online)${C_RESET}"
+        else
+            echo -e "   ${C_CYAN}${C_BOLD}ssh -p ${ssh_port} ${user}@${ts_ip}${C_RESET}  ${C_GREEN}(● Mesh Active & Online)${C_RESET}"
+        fi
+        echo -e "   ${C_DIM}Connect from your laptop or phone anywhere in the world with Tailscale.${C_RESET}"
     else
-        echo -e "   ${C_YELLOW}ssh -p ${ssh_port} ${user}@${public_ip}${C_RESET}  ${C_DIM}(Requires Port ${ssh_port} forwarded on router or tunnel)${C_RESET}"
+        echo -e "\n${C_BOLD}2. Remote via Tailscale Mesh:${C_RESET}"
+        echo -e "   Tailscale is not linked yet. Run: ${C_CYAN}sudo serverctl tailscale login${C_RESET}"
     fi
 
-    echo -e "\n${C_BOLD}3. Zero-Config Remote Tunnel (Works 100% Anywhere):${C_RESET}"
+    echo -e "\n${C_BOLD}3. Outside / Remote Internet Access (Public WAN IP):${C_RESET}"
+    if [ "$ssh_port" -eq 22 ]; then
+        echo -e "   ${C_YELLOW}ssh ${user}@${public_ip}${C_RESET}  ${C_DIM}(Requires Port 22 forwarded on your router)${C_RESET}"
+    else
+        echo -e "   ${C_YELLOW}ssh -p ${ssh_port} ${user}@${public_ip}${C_RESET}  ${C_DIM}(Requires Port ${ssh_port} forwarded on router)${C_RESET}"
+    fi
+
+    echo -e "\n${C_BOLD}4. Zero-Config Ephemeral Remote Tunnel:${C_RESET}"
     if systemctl is-active --quiet server-tunnel.service 2>/dev/null || pgrep -f "a.pinggy.io" >/dev/null 2>&1; then
         local tunnel_cmd=""
         [ -f /var/log/server-my-pc-tunnel.log ] && tunnel_cmd=$(grep -oE 'ssh -p [0-9]+ [a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+' /var/log/server-my-pc-tunnel.log | tail -n1 || echo "")
@@ -229,15 +253,12 @@ cmd_info() {
         echo -e "   Tunnel is currently ${C_YELLOW}inactive${C_RESET}. Run: ${C_CYAN}sudo serverctl tunnel start${C_RESET} to enable."
     fi
 
-    echo -e "\n${C_BOLD}4. Web-Based Terminal & Dashboard (Cockpit):${C_RESET}"
-    echo -e "   URL: ${C_BLUE}https://${local_ip}:9090${C_RESET}"
-    echo -e "   Login with your regular Linux username (${user}) and password."
-
-    echo -e "\n${C_BOLD}5. Router Port Forwarding Guide (For Direct WAN Access):${C_RESET}"
-    echo -e "   If accessing directly from outside your home Wi-Fi without a tunnel:"
-    echo -e "   - Open your router admin dashboard (usually http://192.168.1.1 or 192.168.0.1)"
-    echo -e "   - Navigate to ${C_YELLOW}Port Forwarding${C_RESET} / ${C_YELLOW}Virtual Servers${C_RESET}"
-    echo -e "   - Forward Port ${C_YELLOW}${ssh_port}${C_RESET} (TCP) -> Server IP: ${C_YELLOW}${local_ip}${C_RESET} -> Port ${C_YELLOW}${ssh_port}${C_RESET}\n"
+    echo -e "\n${C_BOLD}5. Web-Based Terminal & Dashboard (Cockpit):${C_RESET}"
+    echo -e "   Local LAN : ${C_BLUE}https://${local_ip}:9090${C_RESET}"
+    if [ -n "$ts_ip" ]; then
+        echo -e "   Remote Mesh: ${C_BLUE}https://${ts_ip}:9090${C_RESET}  ${C_CYAN}(Accessible anywhere via Tailscale)${C_RESET}"
+    fi
+    echo -e "   Login with your regular Linux username (${user}) and password.\n"
 }
 
 # Automated Diagnostic & Port/Firewall Verification
@@ -342,7 +363,20 @@ cmd_verify() {
         check_item "Sleep Targets" "warn" "Sleep targets not masked"
     fi
 
-    # 8. Remote Tunnel Status
+    # 8. Tailscale Mesh VPN
+    if command -v tailscale >/dev/null 2>&1; then
+        local ts_verify_ip
+        ts_verify_ip=$(tailscale ip -4 2>/dev/null || echo "")
+        if [ -n "$ts_verify_ip" ]; then
+            check_item "Tailscale Mesh VPN" "ok" "Connected & authenticated (Mesh IP: ${ts_verify_ip})"
+        else
+            check_item "Tailscale Mesh VPN" "warn" "Installed but not authenticated (Run: sudo serverctl tailscale login)"
+        fi
+    else
+        check_item "Tailscale Mesh VPN" "warn" "Not installed (Run setup.sh again or: curl -fsSL https://tailscale.com/install.sh | sh)"
+    fi
+
+    # 9. Remote Tunnel Status
     if systemctl is-active --quiet server-tunnel.service 2>/dev/null || pgrep -f "a.pinggy.io" >/dev/null 2>&1; then
         check_item "Remote Tunnel" "ok" "Active 24/7 zero-config tunnel running"
     else
@@ -550,6 +584,126 @@ cmd_battery() {
             ;;
         *)
             echo -e "${C_RED}[!] Usage: serverctl battery [status|limit <percent>]${C_RESET}"
+            ;;
+    esac
+}
+
+# Tailscale Mesh VPN Management
+cmd_tailscale() {
+    local action="${1:-status}"
+
+    case "$action" in
+        status|"")
+            echo -e "${C_BOLD}=== Tailscale Mesh VPN Status ===${C_RESET}\n"
+            if ! command -v tailscale >/dev/null 2>&1; then
+                echo -e "  ${C_RED}[✗] Tailscale is NOT installed.${C_RESET}"
+                echo -e "  ${C_CYAN}Install it by re-running setup.sh, or manually:${C_RESET}"
+                echo -e "  ${C_WHITE}curl -fsSL https://tailscale.com/install.sh | sh${C_RESET}"
+                return 1
+            fi
+
+            local ts_status ts_ip ts_hostname ts_account ts_exit_node
+            ts_status=$(tailscale status --json 2>/dev/null)
+
+            if [ -z "$ts_status" ]; then
+                echo -e "  ${C_YELLOW}[!] tailscaled daemon is not running.${C_RESET}"
+                echo -e "  Fix: ${C_CYAN}sudo systemctl enable --now tailscaled${C_RESET}"
+                return 1
+            fi
+
+            ts_ip=$(tailscale ip -4 2>/dev/null || echo "")
+            ts_hostname=$(echo "$ts_status" | grep -oP '"Self":\{[^}]*"HostName":"([^"]+)"' 2>/dev/null | head -1 | grep -oP '"HostName":"([^"]+)"' | cut -d'"' -f4 || hostname)
+
+            local daemon_status
+            if systemctl is-active --quiet tailscaled 2>/dev/null; then
+                daemon_status="${C_GREEN}● Active (running)${C_RESET}"
+            else
+                daemon_status="${C_RED}○ Inactive${C_RESET}"
+            fi
+
+            printf "  %-24s: %b\n" "Tailscale Daemon" "$daemon_status"
+
+            if [ -n "$ts_ip" ]; then
+                printf "  %-24s: ${C_GREEN}${C_BOLD}%s${C_RESET}\n" "Mesh IP (100.x.x.x)" "$ts_ip"
+                printf "  %-24s: ${C_CYAN}%s${C_RESET}\n" "Machine Hostname" "$ts_hostname"
+                local ssh_port=22
+                [ -f "${CONFIG_DIR}/ssh_port" ] && ssh_port=$(cat "${CONFIG_DIR}/ssh_port")
+                local user
+                user=$(logname 2>/dev/null || echo "${SUDO_USER:-$(whoami)}")
+                echo ""
+                echo -e "  ${C_GREEN}${C_BOLD}★ Remote SSH Command (works from anywhere):${C_RESET}"
+                if [ "$ssh_port" -eq 22 ]; then
+                    echo -e "    ${C_CYAN}${C_BOLD}ssh ${user}@${ts_ip}${C_RESET}"
+                else
+                    echo -e "    ${C_CYAN}${C_BOLD}ssh -p ${ssh_port} ${user}@${ts_ip}${C_RESET}"
+                fi
+            else
+                printf "  %-24s: ${C_YELLOW}%s${C_RESET}\n" "Mesh IP" "Not authenticated (run: serverctl tailscale login)"
+            fi
+
+            echo ""
+            echo -e "  ${C_DIM}Connected Peers:${C_RESET}"
+            tailscale status 2>/dev/null | head -n 15 | sed 's/^/    /' || echo "    (no peer info)"
+            ;;
+        login|up|connect)
+            require_root
+            echo -e "${C_CYAN}[*] Bringing Tailscale up with SSH enabled...${C_RESET}"
+            systemctl enable --now tailscaled >/dev/null 2>&1 || service tailscaled start >/dev/null 2>&1 || true
+            if [ -n "$2" ]; then
+                # User provided an auth key
+                tailscale up --authkey="$2" --ssh --accept-routes --reset || true
+            else
+                tailscale up --ssh --accept-routes --reset || true
+            fi
+            local ts_ip
+            ts_ip=$(tailscale ip -4 2>/dev/null || echo "")
+            if [ -n "$ts_ip" ]; then
+                echo -e "${C_GREEN}[✓] Tailscale connected! Mesh IP: ${C_BOLD}${ts_ip}${C_RESET}"
+            else
+                echo -e "${C_YELLOW}[!] Tailscale login initiated. Follow the URL above to authorize.${C_RESET}"
+            fi
+            ;;
+        logout|down|disconnect)
+            require_root
+            echo -e "${C_YELLOW}[*] Disconnecting Tailscale...${C_RESET}"
+            tailscale down 2>/dev/null || true
+            echo -e "${C_GREEN}[✓] Tailscale disconnected. Re-connect with: sudo serverctl tailscale login${C_RESET}"
+            ;;
+        restart)
+            require_root
+            echo -e "${C_CYAN}[*] Restarting Tailscale daemon...${C_RESET}"
+            systemctl restart tailscaled 2>/dev/null || service tailscaled restart 2>/dev/null || true
+            sleep 1
+            local ts_ip
+            ts_ip=$(tailscale ip -4 2>/dev/null || echo "")
+            if [ -n "$ts_ip" ]; then
+                echo -e "${C_GREEN}[✓] Tailscale daemon restarted. Mesh IP: ${C_BOLD}${ts_ip}${C_RESET}"
+            else
+                echo -e "${C_GREEN}[✓] Tailscale daemon restarted.${C_RESET}"
+            fi
+            ;;
+        ip)
+            local ts_ip
+            ts_ip=$(tailscale ip -4 2>/dev/null || echo "")
+            if [ -n "$ts_ip" ]; then
+                echo "$ts_ip"
+            else
+                echo -e "${C_YELLOW}Tailscale is not connected.${C_RESET}" >&2
+                return 1
+            fi
+            ;;
+        peers|devices|network)
+            echo -e "${C_BOLD}=== Tailscale Mesh Peers ===${C_RESET}\n"
+            tailscale status 2>/dev/null || echo -e "${C_YELLOW}Tailscale is not connected.${C_RESET}"
+            ;;
+        *)
+            echo -e "${C_RED}[!] Usage: serverctl tailscale [status|login|logout|restart|ip|peers]${C_RESET}"
+            echo -e "  ${C_CYAN}status${C_RESET}   - Show Tailscale mesh IP, daemon status, and peer list"
+            echo -e "  ${C_CYAN}login${C_RESET}    - Connect/authenticate to Tailscale mesh (optionally pass auth key)"
+            echo -e "  ${C_CYAN}logout${C_RESET}   - Disconnect from Tailscale mesh"
+            echo -e "  ${C_CYAN}restart${C_RESET}  - Restart the Tailscale daemon"
+            echo -e "  ${C_CYAN}ip${C_RESET}       - Print Tailscale mesh IP only (for scripts)"
+            echo -e "  ${C_CYAN}peers${C_RESET}    - List all connected Tailscale mesh devices"
             ;;
     esac
 }
@@ -987,6 +1141,7 @@ cmd_help() {
     printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "open-port <port> [proto]" "Open port in firewall (UFW/firewalld) and request router UPnP"
     printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "close-port <port> [proto]" "Close port in firewall and remove UPnP forward"
     printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "apps [list|install|remove]" "1-click Docker app deployer (Portainer, Nginx Proxy, FileBrowser, etc.)"
+    printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "tailscale [status|login|...]" "Manage Tailscale mesh VPN (100%% reliable remote access)"
     printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "tunnel [start|stop|status]" "Zero-signup CGNAT encrypted tunnel fallback (bypass strict routers)"
     printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "lid [ignore|normal|status]" "Toggle 24/7 lid-close override on/off"
     printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "battery [status|limit <%>]" "Check battery health and set max charging limit (80% protection)"
@@ -1030,6 +1185,10 @@ case "$1" in
     apps|app)
         shift
         cmd_apps "$@"
+        ;;
+    tailscale|ts|mesh)
+        shift
+        cmd_tailscale "$@"
         ;;
     tunnel)
         shift
