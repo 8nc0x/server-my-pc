@@ -131,6 +131,17 @@ if ($SshPublicKey) {
     Write-Host "  [OK] Injected SSH Public Key for passwordless login." -ForegroundColor Green
 }
 
+# Instant SSH Activation Notice
+$quickIp = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -notmatch "Loopback|vEthernet|Virtual" -and $_.IPAddress -notlike "169.254*" } | Select-Object -First 1).IPAddress
+if (-not $quickIp) { $quickIp = "127.0.0.1" }
+Write-Host "`n  ========================================================================" -ForegroundColor Green
+Write-Host "            SSH ACCESS IS NOW LIVE! (INSTANT ACTIVATION)" -ForegroundColor Green
+Write-Host "  ========================================================================" -ForegroundColor Green
+Write-Host ("  Connect right now: ssh {0}@{1}" -f $env:USERNAME, $quickIp) -ForegroundColor Cyan
+Write-Host "  Password: Your Windows login password (or SSH Key)" -ForegroundColor Gray
+Write-Host "  ========================================================================`n" -ForegroundColor Green
+Write-Host "  [*] SSH is listening! Continuing background power and lid optimizations..." -ForegroundColor DarkGray
+
 # Step 4: 24/7 Power and Laptop Lid Close Optimization
 Write-Host "`n==> [4/6] Optimizing Power and Laptop Lid for 24/7 Always-On Operation..." -ForegroundColor Cyan
 powercfg /change standby-timeout-ac 0

@@ -572,6 +572,79 @@ EOF
     success "OpenSSH configured on port ${SSH_PORT} with session keep-alives and enabled on boot."
 }
 
+# Activate Instant SSH Access (Phase 1)
+activate_instant_ssh() {
+    step "Phase 1: Activating Instant OpenSSH Server Access"
+
+    # Quickly ensure OpenSSH server and sudo are installed
+    if ! command -v sshd >/dev/null 2>&1; then
+        info "Installing OpenSSH server package..."
+        case "$PKG_MGR" in
+            apt)
+                export DEBIAN_FRONTEND=noninteractive
+                apt-get update -qq >/dev/null 2>&1 || true
+                apt-get install -y -qq openssh-server sudo >/dev/null 2>&1 || apt-get install -y openssh-server sudo
+                ;;
+            dnf|yum)
+                dnf install -y -q openssh-server sudo >/dev/null 2>&1 || yum install -y openssh-server sudo
+                ;;
+            pacman)
+                pacman -Sy --noconfirm --needed openssh sudo >/dev/null 2>&1
+                ;;
+            zypper)
+                zypper --non-interactive install -y openssh sudo >/dev/null 2>&1
+                ;;
+            apk)
+                apk add --no-cache openssh sudo >/dev/null 2>&1
+                ;;
+            xbps)
+                xbps-install -Sy openssh sudo >/dev/null 2>&1
+                ;;
+        esac
+    fi
+
+    # Configure user credentials, password, and authorized_keys
+    configure_user_permissions
+
+    # Configure and start OpenSSH daemon immediately
+    configure_openssh
+
+    # Ensure firewall does not block SSH immediately
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+        ufw allow "${SSH_PORT}/tcp" >/dev/null 2>&1 || true
+    elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state 2>/dev/null | grep -q "running"; then
+        firewall-cmd --permanent --add-port="${SSH_PORT}/tcp" >/dev/null 2>&1 || true
+        firewall-cmd --reload >/dev/null 2>&1 || true
+    fi
+
+    # Detect IPs immediately
+    local local_ip public_ip
+    local_ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
+    [ -z "$local_ip" ] && local_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    [ -z "$local_ip" ] && local_ip="127.0.0.1"
+    public_ip=$(curl -s --max-time 2 https://api.ipify.org 2>/dev/null || echo "Detecting in background...")
+
+    echo -e "\n${C_GREEN}${C_BOLD}"
+    cat << "EOF"
+  ========================================================================
+            ⚡ SSH ACCESS IS NOW LIVE! (INSTANT ACTIVATION) ⚡             
+  ========================================================================
+EOF
+    echo -e "${C_RESET}"
+    echo -e "  ${C_BOLD}You can connect right now from another machine:${C_RESET}"
+    if [ "$SSH_PORT" -eq 22 ]; then
+        echo -e "  ${C_CYAN}${C_BOLD}► Local WiFi SSH :${C_RESET} ${C_GREEN}ssh ${TARGET_USER}@${local_ip}${C_RESET}"
+        echo -e "  ${C_YELLOW}${C_BOLD}► Public WAN SSH :${C_RESET} ${C_YELLOW}ssh ${TARGET_USER}@${public_ip}${C_RESET}"
+    else
+        echo -e "  ${C_CYAN}${C_BOLD}► Local WiFi SSH :${C_RESET} ${C_GREEN}ssh -p ${SSH_PORT} ${TARGET_USER}@${local_ip}${C_RESET}"
+        echo -e "  ${C_YELLOW}${C_BOLD}► Public WAN SSH :${C_RESET} ${C_YELLOW}ssh -p ${SSH_PORT} ${TARGET_USER}@${public_ip}${C_RESET}"
+    fi
+    echo -e "  ${C_WHITE}► Password       :${C_RESET} ${C_WHITE}${PASSWORD_DISPLAY}${C_RESET}"
+    echo -e "  ========================================================================\n"
+    info "SSH port ${SSH_PORT} is verified and listening. You can switch to SSH anytime."
+    info "Now continuing Phase 2 (24/7 lid close, power tuning, background tools)..."
+}
+
 # Firewall & Security Hardening
 configure_firewall_and_security() {
     step "Configuring Firewall & Intrusion Prevention"
@@ -940,11 +1013,10 @@ main() {
     ensure_root "$@"
     print_banner
     detect_os
-    install_base_packages
+    activate_instant_ssh
     configure_power_and_lid
     tune_kernel_and_network
-    configure_user_permissions
-    configure_openssh
+    install_base_packages
     configure_firewall_and_security
     install_self_healing_daemons
     install_cockpit
