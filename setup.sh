@@ -634,6 +634,83 @@ EOF
 
     systemctl enable --now server-thermal-guard.service >/dev/null 2>&1 || true
     success "Thermal Guard active (monitors closed-lid hardware thermals)."
+
+    # 3. Boot Persistence & Recovery Service (Runs on Every Startup)
+    cat > /usr/local/bin/server-my-pc-boot << 'EOF'
+#!/usr/bin/env bash
+# server-my-pc-boot - Runs automatically on every system startup
+CONFIG_DIR="/etc/server-my-pc"
+SSH_PORT="22"
+[ -f "${CONFIG_DIR}/ssh_port" ] && SSH_PORT=$(cat "${CONFIG_DIR}/ssh_port")
+
+# 1. Re-enforce 24/7 power & lid policies
+systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target >/dev/null 2>&1 || true
+
+# 2. Re-apply hardware battery charging limit (80% protection)
+for f in /sys/class/power_supply/BAT*/charge_control_limit_max; do
+    [ -f "$f" ] && echo "80" > "$f" 2>/dev/null || true
+done
+
+# 3. Re-apply Wi-Fi power save disable & Wake-on-LAN
+if command -v iw >/dev/null 2>&1; then
+    for iface in $(iw dev 2>/dev/null | awk '$1=="Interface"{print $2}'); do
+        iw dev "$iface" set power_save off 2>/dev/null || true
+    done
+fi
+if command -v ethtool >/dev/null 2>&1; then
+    for iface in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^(eth|en)'); do
+        ethtool -s "$iface" wol g >/dev/null 2>&1 || true
+    done
+fi
+
+# 4. Re-announce router UPnP port mappings
+LOCAL_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
+if command -v upnpc >/dev/null 2>&1 && [ -n "$LOCAL_IP" ]; then
+    upnpc -a "$LOCAL_IP" "$SSH_PORT" "$SSH_PORT" TCP >/dev/null 2>&1 || true
+    upnpc -a "$LOCAL_IP" 9090 9090 TCP >/dev/null 2>&1 || true
+fi
+
+# 5. Auto-resume CGNAT tunnel if enabled
+if [ -f "${CONFIG_DIR}/tunnel.enabled" ] && command -v cloudflared >/dev/null 2>&1; then
+    pkill -f "cloudflared tunnel" 2>/dev/null || true
+    nohup cloudflared tunnel --url "ssh://localhost:${SSH_PORT}" > /var/log/server-my-pc-tunnel.log 2>&1 &
+fi
+
+# 6. Send Boot Alert Webhook (Discord / Telegram) if configured
+if [ -f "${CONFIG_DIR}/notify.conf" ]; then
+    # shellcheck source=/dev/null
+    source "${CONFIG_DIR}/notify.conf"
+    PUBLIC_IP=$(curl -s --max-time 3 https://api.ipify.org 2>/dev/null || echo "Unknown")
+    HOSTNAME=$(hostname)
+    MSG="[server-my-pc] Server '${HOSTNAME}' has BOOTED and is 24/7 ONLINE! Local IP: ${LOCAL_IP} | Public IP: ${PUBLIC_IP} | Port: ${SSH_PORT}"
+
+    if [ -n "$DISCORD_WEBHOOK" ]; then
+        curl -s -H "Content-Type: application/json" -X POST -d "{\"content\": \"$MSG\"}" "$DISCORD_WEBHOOK" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+        curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d "chat_id=${TELEGRAM_CHAT_ID}&text=${MSG}" >/dev/null 2>&1 || true
+    fi
+fi
+EOF
+    chmod +x /usr/local/bin/server-my-pc-boot
+
+    cat > /etc/systemd/system/server-my-pc-boot.service << "EOF"
+[Unit]
+Description=server-my-pc Boot Persistence & Recovery Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/server-my-pc-boot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl enable server-my-pc-boot.service >/dev/null 2>&1 || true
+    success "Boot Persistence Engine active (re-enforces 24/7 power, UPnP, and tunnels after every reboot)."
 }
 
 # Install Cockpit Web Console

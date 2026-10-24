@@ -68,7 +68,8 @@ if ($Uninstall) {
     powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 1
     powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 1
     powercfg /SetActive SCHEME_CURRENT
-    Write-Host "[OK] Windows default laptop sleep and lid settings restored." -ForegroundColor Green
+    Unregister-ScheduledTask -TaskName "server-my-pc-boot" -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+    Write-Host "[OK] Windows default laptop sleep, lid settings, and boot task restored." -ForegroundColor Green
     exit 0
 }
 
@@ -181,6 +182,36 @@ if ($machinePath -notlike "*$binDir*") {
     [Environment]::SetEnvironmentVariable("PATH", "$machinePath;$binDir", [EnvironmentVariableTarget]::Machine)
 }
 Write-Host "  [OK] Global serverctl command installed to PATH." -ForegroundColor Green
+
+# Register Windows Boot Persistence Scheduled Task (Runs as SYSTEM at every startup)
+Write-Host "`n==> [5b/6] Configuring Windows Boot Persistence Task..." -ForegroundColor Cyan
+$bootScriptLines = @(
+    '# server-my-pc Windows Boot Persistence Script',
+    'powercfg /change standby-timeout-ac 0',
+    'powercfg /change standby-timeout-dc 0',
+    'powercfg /change hibernate-timeout-ac 0',
+    'powercfg /change hibernate-timeout-dc 0',
+    'powercfg /change disk-timeout-ac 0',
+    'powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0',
+    'powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0',
+    'powercfg /SetActive SCHEME_CURRENT',
+    'Start-Service -Name sshd -ErrorAction SilentlyContinue'
+)
+Set-Content -Path "$binDir\boot.ps1" -Value $bootScriptLines
+
+try {
+    $taskName = "server-my-pc-boot"
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$binDir\boot.ps1`""
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
+    Write-Host "  [OK] Boot Persistence Task registered (runs as SYSTEM at startup before user login)." -ForegroundColor Green
+}
+catch {
+    Write-Warning "Could not register scheduled task: $_"
+}
 
 # Step 6: Detect IPs and Display Summary
 Write-Host "`n==> [6/6] Finalizing Connection Telemetry..." -ForegroundColor Cyan

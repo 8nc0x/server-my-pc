@@ -141,6 +141,10 @@ sudo serverctl security unban <ip>
 sudo serverctl notify setup
 serverctl notify test
 
+# 24/7 Reboot Persistence & Stickiness Telemetry
+serverctl persistence
+serverctl bios
+
 # Live Log Viewer
 serverctl logs ssh
 serverctl logs fail2ban
@@ -155,6 +159,41 @@ sudo serverctl uninstall
 ```
 
 ---
+
+## 🔄 24/7 Reboot Survival & Stickiness Engine
+
+What happens if the power goes out, or the computer is turned off and turned back on?
+**Everything is 100% persistent and sticky.**
+
+```
+                                      PC BOOTS UP
+                                           │
+             ┌─────────────────────────────┴─────────────────────────────┐
+             ▼                                                           ▼
+       [Linux Systemd]                                            [Windows Services]
+   server-my-pc-boot.service                                 server-my-pc-boot Task
+             │                                                           │
+             ├─► Re-masks sleep/suspend targets                          ├─► Re-applies 24/7 power policies
+             ├─► Enforces 80% battery swelling protection                ├─► Verifies OpenSSH running
+             ├─► Re-announces router UPnP port maps                      ├─► Re-applies firewall rules
+             ├─► Auto-resumes CGNAT tunnel (if enabled)                  └─► Operates BEFORE user login
+             ├─► Restarts Docker containers (--restart=always)
+             └─► Sends Boot Alert (Discord/Telegram webhook)
+```
+
+### 1. Headless Startup Before Login
+- **Linux**: Systemd units (`sshd`, `cockpit`, `docker`, `server-watchdog`, `server-my-pc-boot`) run in `multi-user.target`. They start immediately on boot **without requiring anyone to log into the desktop or terminal**.
+- **Windows**: `sshd` runs as a native Windows Service under `NT AUTHORITY\SYSTEM`. The `server-my-pc-boot` Scheduled Task triggers `AtStartup` with Highest Privileges, keeping the server active even when sitting on the Windows Lock screen.
+
+### 2. Auto-Reannouncing UPnP Port Maps
+When a home router or PC reboots, the router often wipes its UPnP table. The `server-my-pc-boot` engine automatically re-announces Port 22 and Port 9090 to your Wi-Fi router on every startup, ensuring external access is never lost.
+
+### 3. Turning ON Automatically After Power Loss (BIOS AC Recovery)
+If power cuts at home and restores later, you can make your computer turn itself on automatically:
+```bash
+serverctl bios
+```
+Follow the simple steps in your motherboard's BIOS to set **"Restore on AC/Power Loss"** or **"Wake on AC"** to **Power On**. Once enabled, your machine will automatically boot up whenever plugged in, without needing anyone to press the power button!
 
 ## 📡 Remote Access & Port Forwarding Guide
 

@@ -449,13 +449,16 @@ cmd_tunnel() {
             fi
 
             echo -e "${C_GREEN}[*] Launching Quick Tunnel for SSH (Port 22)...${C_RESET}"
+            mkdir -p "$CONFIG_DIR"
+            touch "${CONFIG_DIR}/tunnel.enabled"
             nohup cloudflared tunnel --url ssh://localhost:22 > /var/log/server-my-pc-tunnel.log 2>&1 &
             sleep 3
             local tunnel_url
             tunnel_url=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /var/log/server-my-pc-tunnel.log | head -n1 || echo "")
             if [ -n "$tunnel_url" ]; then
-                echo -e "${C_GREEN}${C_BOLD}[✓] Tunnel is ACTIVE!${C_RESET}"
+                echo -e "${C_GREEN}${C_BOLD}[✓] Tunnel is ACTIVE & PERSISTENT!${C_RESET}"
                 echo -e "Public Tunnel Hostname: ${C_CYAN}${tunnel_url}${C_RESET}"
+                echo -e "${C_DIM}This tunnel will now automatically resume after every reboot.${C_RESET}"
                 echo -e "You can connect via Cloudflare Access or cloudflared client."
             else
                 echo -e "${C_YELLOW}[*] Tunnel started in background. Check: serverctl tunnel status${C_RESET}"
@@ -463,8 +466,9 @@ cmd_tunnel() {
             ;;
         stop)
             require_root
+            rm -f "${CONFIG_DIR}/tunnel.enabled"
             pkill -f "cloudflared tunnel" 2>/dev/null || true
-            echo -e "${C_GREEN}[✓] Remote tunnel stopped.${C_RESET}"
+            echo -e "${C_GREEN}[✓] Remote tunnel stopped and autostart disabled.${C_RESET}"
             ;;
         status)
             if pgrep -f "cloudflared tunnel" >/dev/null 2>&1; then
@@ -745,6 +749,69 @@ cmd_uninstall() {
     rm -f /usr/local/bin/serverctl /usr/local/bin/server-my-pc
 }
 
+# Persistence & Boot Stickiness Telemetry
+cmd_persistence() {
+    show_banner
+    echo -e "${C_WHITE}${C_BOLD}=== 24/7 AUTO-BOOT & STICKINESS TELEMETRY ===${C_RESET}\n"
+
+    local boot_svc="Inactive"
+    if systemctl is-enabled --quiet server-my-pc-boot.service 2>/dev/null; then
+        boot_svc="${C_GREEN}ENABLED (Re-applies all settings on every startup)${C_RESET}"
+    fi
+    echo -e "Boot Persistence Engine: $boot_svc"
+
+    local sleep_status="Normal"
+    if systemctl is-masked --quiet sleep.target 2>/dev/null; then
+        sleep_status="${C_GREEN}MASKED (Cannot sleep/suspend under any condition)${C_RESET}"
+    fi
+    echo -e "System Sleep Targets   : $sleep_status"
+
+    local lid_status="Normal"
+    if [ -f /etc/systemd/logind.conf.d/99-server-my-pc.conf ] && grep -q "HandleLidSwitch=ignore" /etc/systemd/logind.conf.d/99-server-my-pc.conf 2>/dev/null; then
+        lid_status="${C_GREEN}Lid Close Ignored (Always ON 24/7)${C_RESET}"
+    fi
+    echo -e "Laptop Lid Policy      : $lid_status"
+
+    local tunnel_auto="Disabled"
+    if [ -f "${CONFIG_DIR}/tunnel.enabled" ]; then
+        tunnel_auto="${C_GREEN}ENABLED (Tunnel resumes automatically after reboot)${C_RESET}"
+    fi
+    echo -e "CGNAT Tunnel Auto-Start: $tunnel_auto"
+
+    local watchdog_status="Inactive"
+    if systemctl is-enabled --quiet server-watchdog.timer 2>/dev/null; then
+        watchdog_status="${C_GREEN}ACTIVE (Pings gateway every 60s, auto-reconnects)${C_RESET}"
+    fi
+    echo -e "Network Watchdog       : $watchdog_status"
+
+    local docker_auto="N/A"
+    if command -v docker >/dev/null 2>&1; then
+        local count
+        count=$(docker ps -a --filter "restart=always" --format '{{.Names}}' 2>/dev/null | wc -l)
+        docker_auto="${C_GREEN}${count} container(s) configured with --restart=always${C_RESET}"
+    fi
+    echo -e "Docker Container Auto  : $docker_auto"
+
+    echo -e "\n${C_BOLD}Power Cut & Cold-Boot Auto Power On (BIOS):${C_RESET}"
+    echo -e "  To make your computer automatically turn ON when wall power is plugged in/restored:"
+    echo -e "  Run: ${C_CYAN}serverctl bios${C_RESET} for step-by-step motherboard instructions.\n"
+}
+
+# BIOS AC Power Recovery Guide
+cmd_bios() {
+    show_banner
+    echo -e "${C_CYAN}${C_BOLD}=== MOTHERBOARD AC POWER RECOVERY GUIDE ===${C_RESET}\n"
+    echo -e "To make your PC or laptop automatically power ON when electricity returns after an outage:"
+    echo -e "1. Reboot your computer and enter BIOS/UEFI setup (press ${C_YELLOW}F2${C_RESET}, ${C_YELLOW}Del${C_RESET}, ${C_YELLOW}F10${C_RESET}, or ${C_YELLOW}F12${C_RESET} during boot)."
+    echo -e "2. Navigate to ${C_BOLD}Power Management${C_RESET} or ${C_BOLD}Advanced Settings${C_RESET}."
+    echo -e "3. Look for the setting named:"
+    echo -e "   - ${C_GREEN}'Restore on AC/Power Loss'${C_RESET} -> Set to: ${C_YELLOW}Power On${C_RESET} or ${C_YELLOW}Last State${C_RESET}"
+    echo -e "   - ${C_GREEN}'AC Back' / 'State After G3'${C_RESET} -> Set to: ${C_YELLOW}Always On${C_RESET}"
+    echo -e "   - On Laptops (Lenovo/Dell/HP): ${C_GREEN}'Wake on AC' / 'Auto Power on AC Attach'${C_RESET} -> Set to: ${C_YELLOW}Enabled${C_RESET}"
+    echo -e "4. Save and exit (F10)."
+    echo -e "\n${C_DIM}Once enabled, whenever the power cable is plugged in or power returns after an outage, your computer turns on automatically without pressing the power button!${C_RESET}\n"
+}
+
 # Help Menu
 cmd_help() {
     show_banner
@@ -754,6 +821,8 @@ cmd_help() {
     printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "status" "Print full server telemetry, resources, IP, and service health"
     printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "dashboard" "Launch live real-time interactive terminal dashboard (TUI)"
     printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "info" "Show detailed connection commands, SSH, Cockpit URL & port guide"
+    printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "persistence" "Check 24/7 reboot survival, boot daemons, and stickiness"
+    printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "bios" "Guide for setting BIOS auto-power-on after electricity cuts"
     printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "open-port <port> [proto]" "Open port in firewall (UFW/firewalld) and request router UPnP"
     printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "close-port <port> [proto]" "Close port in firewall and remove UPnP forward"
     printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "apps [list|install|remove]" "1-click Docker app deployer (Portainer, Nginx Proxy, FileBrowser, etc.)"
@@ -779,6 +848,12 @@ case "$1" in
         ;;
     info|connect)
         cmd_info
+        ;;
+    persistence|sticky|autostart)
+        cmd_persistence
+        ;;
+    bios|power-recovery)
+        cmd_bios
         ;;
     open-port|allow)
         shift
