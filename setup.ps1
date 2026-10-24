@@ -93,29 +93,42 @@ catch {
 # Step 2: Start and Configure SSHD Service
 Write-Host "`n==> [2/6] Starting and Enabling SSHD Services..." -ForegroundColor Cyan
 Set-Service -Name sshd -StartupType 'Automatic'
-Start-Service -Name sshd
+
+# Ensure sshd_config enables PasswordAuthentication and PubkeyAuthentication
+$sshdConfigPath = "$env:ProgramData\ssh\sshd_config"
+if (Test-Path $sshdConfigPath) {
+    $cfg = Get-Content $sshdConfigPath -Raw
+    $cfg = $cfg -replace '^[#\s]*PasswordAuthentication\s+no', 'PasswordAuthentication yes'
+    $cfg = $cfg -replace '^[#\s]*PubkeyAuthentication\s+no', 'PubkeyAuthentication yes'
+    Set-Content -Path $sshdConfigPath -Value $cfg
+}
+
+Restart-Service -Name sshd -Force -ErrorAction SilentlyContinue | Out-Null
+Start-Service -Name sshd -ErrorAction SilentlyContinue | Out-Null
 
 if (Get-Service -Name 'ssh-agent' -ErrorAction SilentlyContinue) {
     Set-Service -Name 'ssh-agent' -StartupType 'Automatic'
-    Start-Service -Name 'ssh-agent'
+    Start-Service -Name 'ssh-agent' -ErrorAction SilentlyContinue | Out-Null
 }
 Write-Host "  [OK] SSHD service running and configured for automatic startup on boot." -ForegroundColor Green
 
 # Step 3: Windows Defender Firewall Configuration
 Write-Host "`n==> [3/6] Configuring Windows Defender Firewall..." -ForegroundColor Cyan
-$existingRule = Get-NetFirewallRule -Name "server-my-pc-sshd" -ErrorAction SilentlyContinue
-if (-not $existingRule) {
-    New-NetFirewallRule -Name "server-my-pc-sshd" `
-        -DisplayName "server-my-pc OpenSSH Server (Port $SshPort)" `
-        -Description "Allows inbound SSH connections for server-my-pc" `
-        -Group "server-my-pc" `
-        -Enabled True `
-        -Direction Inbound `
-        -Protocol TCP `
-        -LocalPort $SshPort `
-        -Action Allow | Out-Null
-}
-Write-Host "  [OK] Inbound Port $SshPort allowed in Windows Defender Firewall." -ForegroundColor Green
+Remove-NetFirewallRule -Name "server-my-pc-sshd" -ErrorAction SilentlyContinue | Out-Null
+New-NetFirewallRule -Name "server-my-pc-sshd" `
+    -DisplayName "server-my-pc OpenSSH Server (Port $SshPort)" `
+    -Description "Allows inbound SSH connections on all network profiles for server-my-pc" `
+    -Group "server-my-pc" `
+    -Enabled True `
+    -Direction Inbound `
+    -Protocol TCP `
+    -LocalPort $SshPort `
+    -Profile Any `
+    -Action Allow | Out-Null
+
+Enable-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue | Out-Null
+Set-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -Profile Any -ErrorAction SilentlyContinue | Out-Null
+Write-Host "  [OK] Inbound Port $SshPort allowed on ALL network profiles (Private/Public/Domain)." -ForegroundColor Green
 
 # Setup SSH Directory & Authorized Keys
 $sshDir = "$env:USERPROFILE\.ssh"

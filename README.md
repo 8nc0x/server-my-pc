@@ -124,6 +124,9 @@ sudo bash setup.sh --preset hardened
 `setup.sh` installs a global, high-power management CLI available anywhere in your terminal:
 
 ```bash
+# Run automated diagnostic verification of SSH, firewall, ports, and power
+serverctl verify
+
 # View comprehensive system & network telemetry
 serverctl status
 

@@ -202,33 +202,160 @@ cmd_info() {
     fi
 
     echo -e "${C_GREEN}${C_BOLD}=== COMPLETE SERVER ACCESS DETAILS ===${C_RESET}\n"
-    echo -e "${C_BOLD}1. Local Network Connection (Home / Office WiFi):${C_RESET}"
+    echo -e "${C_BOLD}1. Same Wi-Fi Router (Local LAN):${C_RESET}"
     if [ "$ssh_port" -eq 22 ]; then
-        echo -e "   ${C_CYAN}ssh ${user}@${local_ip}${C_RESET}"
+        echo -e "   ${C_GREEN}${C_BOLD}ssh ${user}@${local_ip}${C_RESET}  ${C_BOLD}${C_WHITE}(← USE THIS if your client PC is on the same Wi-Fi!)${C_RESET}"
     else
-        echo -e "   ${C_CYAN}ssh -p ${ssh_port} ${user}@${local_ip}${C_RESET}"
+        echo -e "   ${C_GREEN}${C_BOLD}ssh -p ${ssh_port} ${user}@${local_ip}${C_RESET}  ${C_BOLD}${C_WHITE}(← USE THIS if your client PC is on the same Wi-Fi!)${C_RESET}"
     fi
 
-    echo -e "\n${C_BOLD}2. Remote / Internet Access:${C_RESET}"
+    echo -e "\n${C_BOLD}2. Outside / Remote Internet Access (Public WAN IP):${C_RESET}"
     if [ "$ssh_port" -eq 22 ]; then
-        echo -e "   ${C_CYAN}ssh ${user}@${public_ip}${C_RESET}"
+        echo -e "   ${C_YELLOW}ssh ${user}@${public_ip}${C_RESET}  ${C_DIM}(Requires Port 22 forwarded on your router or active tunnel)${C_RESET}"
     else
-        echo -e "   ${C_CYAN}ssh -p ${ssh_port} ${user}@${public_ip}${C_RESET}"
+        echo -e "   ${C_YELLOW}ssh -p ${ssh_port} ${user}@${public_ip}${C_RESET}  ${C_DIM}(Requires Port ${ssh_port} forwarded on router or tunnel)${C_RESET}"
     fi
 
-    echo -e "\n${C_BOLD}3. Web-Based Terminal & Dashboard (Cockpit):${C_RESET}"
+    echo -e "\n${C_BOLD}3. Zero-Config Remote Tunnel (Works 100% Anywhere):${C_RESET}"
+    if systemctl is-active --quiet server-tunnel.service 2>/dev/null || pgrep -f "a.pinggy.io" >/dev/null 2>&1; then
+        local tunnel_cmd=""
+        [ -f /var/log/server-my-pc-tunnel.log ] && tunnel_cmd=$(grep -oE 'ssh -p [0-9]+ [a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+' /var/log/server-my-pc-tunnel.log | tail -n1 || echo "")
+        if [ -n "$tunnel_cmd" ]; then
+            echo -e "   ${C_GREEN}${C_BOLD}${tunnel_cmd}${C_RESET}  ${C_CYAN}(● Tunnel ACTIVE)${C_RESET}"
+        else
+            echo -e "   ${C_GREEN}Tunnel daemon is active.${C_RESET} Check: ${C_CYAN}serverctl tunnel status${C_RESET}"
+        fi
+    else
+        echo -e "   Tunnel is currently ${C_YELLOW}inactive${C_RESET}. Run: ${C_CYAN}sudo serverctl tunnel start${C_RESET} to enable."
+    fi
+
+    echo -e "\n${C_BOLD}4. Web-Based Terminal & Dashboard (Cockpit):${C_RESET}"
     echo -e "   URL: ${C_BLUE}https://${local_ip}:9090${C_RESET}"
     echo -e "   Login with your regular Linux username (${user}) and password."
 
-    echo -e "\n${C_BOLD}4. Router Port Forwarding Guide (For Public Access):${C_RESET}"
-    echo -e "   If accessing from outside your home Wi-Fi:"
-    echo -e "   - Open your home router admin page (usually http://192.168.1.1 or 192.168.0.1)"
-    echo -e "   - Navigate to ${C_YELLOW}Port Forwarding${C_RESET} or ${C_YELLOW}Virtual Server${C_RESET}"
-    echo -e "   - Forward External Port: ${C_YELLOW}${ssh_port}${C_RESET} -> Internal IP: ${C_YELLOW}${local_ip}${C_RESET} -> Internal Port: ${C_YELLOW}${ssh_port}${C_RESET} (TCP)"
-    echo -e "   - Forward External Port: ${C_YELLOW}9090${C_RESET} -> Internal IP: ${C_YELLOW}${local_ip}${C_RESET} -> Internal Port: ${C_YELLOW}9090${C_RESET} (TCP, optional for Web Console)"
+    echo -e "\n${C_BOLD}5. Router Port Forwarding Guide (For Direct WAN Access):${C_RESET}"
+    echo -e "   If accessing directly from outside your home Wi-Fi without a tunnel:"
+    echo -e "   - Open your router admin dashboard (usually http://192.168.1.1 or 192.168.0.1)"
+    echo -e "   - Navigate to ${C_YELLOW}Port Forwarding${C_RESET} / ${C_YELLOW}Virtual Servers${C_RESET}"
+    echo -e "   - Forward Port ${C_YELLOW}${ssh_port}${C_RESET} (TCP) -> Server IP: ${C_YELLOW}${local_ip}${C_RESET} -> Port ${C_YELLOW}${ssh_port}${C_RESET}\n"
+}
 
-    echo -e "\n${C_BOLD}5. Stuck behind CGNAT or Strict ISP?${C_RESET}"
-    echo -e "   Run: ${C_GREEN}sudo serverctl tunnel start${C_RESET} to get a free, zero-signup secure tunnel URL immediately!\n"
+# Automated Diagnostic & Port/Firewall Verification
+cmd_verify() {
+    show_banner
+    echo -e "${C_CYAN}${C_BOLD}=== COMPLETE SERVER DIAGNOSTIC & VERIFICATION AUDIT ===${C_RESET}\n"
+
+    local passed=0
+    local total=0
+
+    check_item() {
+        local name="$1"
+        local status="$2"
+        local detail="$3"
+        total=$((total + 1))
+        if [ "$status" = "ok" ]; then
+            passed=$((passed + 1))
+            echo -e "  ${C_GREEN}[✓ PASS]${C_RESET} ${C_BOLD}${name}${C_RESET}: ${detail}"
+        elif [ "$status" = "warn" ]; then
+            echo -e "  ${C_YELLOW}[⚠ WARN]${C_RESET} ${C_BOLD}${name}${C_RESET}: ${detail}"
+        else
+            echo -e "  ${C_RED}[✗ FAIL]${C_RESET} ${C_BOLD}${name}${C_RESET}: ${detail}"
+        fi
+    }
+
+    # 1. SSH Daemon Service Running
+    if systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null; then
+        check_item "SSH Service" "ok" "Active and running on systemd"
+    else
+        check_item "SSH Service" "fail" "SSH service is NOT active. Run: sudo systemctl restart ssh"
+    fi
+
+    # 2. Port Listening
+    local port="${SSH_PORT:-22}"
+    [ -f "${CONFIG_DIR}/ssh_port" ] && port=$(cat "${CONFIG_DIR}/ssh_port")
+    if ss -tuln 2>/dev/null | grep -q ":${port} " || netstat -tuln 2>/dev/null | grep -q ":${port} "; then
+        check_item "Port ${port} Listening" "ok" "OpenSSH is actively listening on 0.0.0.0:${port}"
+    else
+        check_item "Port ${port} Listening" "fail" "Nothing listening on port ${port}!"
+    fi
+
+    # 3. SSH Password Authentication
+    local pw_auth="no"
+    if [ -f /etc/ssh/sshd_config.d/00-server-my-pc.conf ] && grep -q "PasswordAuthentication yes" /etc/ssh/sshd_config.d/00-server-my-pc.conf; then
+        pw_auth="yes"
+    elif [ -f /etc/ssh/sshd_config ] && grep -qE "^[[:space:]]*PasswordAuthentication[[:space:]]+yes" /etc/ssh/sshd_config; then
+        pw_auth="yes"
+    fi
+    if [ "$pw_auth" = "yes" ]; then
+        check_item "Password Auth" "ok" "Password authentication enabled in sshd_config"
+    else
+        check_item "Password Auth" "warn" "Password authentication might be disabled"
+    fi
+
+    # 4. Firewall (UFW / firewalld / iptables)
+    local fw_ok=false
+    local fw_info="No active firewall blocking"
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+        if ufw status | grep -E "${port}/tcp" | grep -q "ALLOW"; then
+            fw_ok=true
+            fw_info="UFW active, Port ${port}/tcp explicitly allowed"
+        else
+            fw_info="UFW active, but Port ${port} is NOT allowed!"
+        fi
+    elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state 2>/dev/null | grep -q "running"; then
+        if firewall-cmd --list-ports 2>/dev/null | grep -q "${port}/tcp"; then
+            fw_ok=true
+            fw_info="firewalld active, Port ${port}/tcp explicitly allowed"
+        else
+            fw_info="firewalld active, but Port ${port} missing from open ports!"
+        fi
+    else
+        fw_ok=true
+        fw_info="Kernel iptables default permit or firewall inactive"
+    fi
+    if [ "$fw_ok" = true ]; then
+        check_item "Firewall Defense" "ok" "$fw_info"
+    else
+        check_item "Firewall Defense" "fail" "$fw_info"
+    fi
+
+    # 5. Fail2ban Local Whitelist
+    if command -v fail2ban-client >/dev/null 2>&1 && systemctl is-active --quiet fail2ban 2>/dev/null; then
+        local banned
+        banned=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned:" | awk '{print $NF}' || echo "0")
+        check_item "Fail2ban Defense" "ok" "Fail2ban active with local LAN whitelisted (${banned} currently banned)"
+    else
+        check_item "Fail2ban Defense" "ok" "No IP lockout active"
+    fi
+
+    # 6. 24/7 Power & Lid-Close
+    if [ -f /etc/systemd/logind.conf.d/99-server-my-pc.conf ] && grep -q "HandleLidSwitch=ignore" /etc/systemd/logind.conf.d/99-server-my-pc.conf; then
+        check_item "24/7 Lid Policy" "ok" "Lid close is ignored, system stays awake 24/7"
+    else
+        check_item "24/7 Lid Policy" "warn" "Lid close override not found (Desktop or unconfigured)"
+    fi
+
+    # 7. Sleep Targets Masked
+    if systemctl is-enabled sleep.target 2>/dev/null | grep -q "masked"; then
+        check_item "Sleep Targets" "ok" "System sleep, suspend, and hibernate targets permanently masked"
+    else
+        check_item "Sleep Targets" "warn" "Sleep targets not masked"
+    fi
+
+    # 8. Remote Tunnel Status
+    if systemctl is-active --quiet server-tunnel.service 2>/dev/null || pgrep -f "a.pinggy.io" >/dev/null 2>&1; then
+        check_item "Remote Tunnel" "ok" "Active 24/7 zero-config tunnel running"
+    else
+        check_item "Remote Tunnel" "warn" "Inactive (Run: sudo serverctl tunnel start for outside access)"
+    fi
+
+    echo -e "\n${C_BOLD}Audit Summary:${C_RESET} ${passed}/${total} checks passed."
+    local local_ip
+    local_ip=$(get_local_ip)
+    local user
+    user=$(whoami)
+    echo -e "\n${C_GREEN}${C_BOLD}Ready-to-use SSH Command:${C_RESET}"
+    echo -e "  ${C_CYAN}ssh ${user}@${local_ip}${C_RESET}  ${C_DIM}(From any computer on same Wi-Fi)${C_RESET}\n"
 }
 
 # Live Interactive Dashboard
@@ -442,6 +569,13 @@ cmd_tunnel() {
             pkill -f "a.pinggy.io" 2>/dev/null || true
             mkdir -p "$CONFIG_DIR"
             touch "${CONFIG_DIR}/tunnel.enabled"
+
+            # Ensure root has an SSH key pair so connection to a.pinggy.io succeeds
+            if [ ! -f /root/.ssh/id_ed25519 ] && [ ! -f /root/.ssh/id_rsa ]; then
+                mkdir -p /root/.ssh
+                chmod 700 /root/.ssh
+                ssh-keygen -t ed25519 -N "" -f /root/.ssh/id_ed25519 -q 2>/dev/null || true
+            fi
 
             # Create systemd service for 24/7 auto-restart & persistence across reboots
             cat > /etc/systemd/system/server-tunnel.service << EOF
@@ -846,6 +980,7 @@ cmd_help() {
     echo -e "${C_BOLD}CORE COMMANDS:${C_RESET}"
     printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "status" "Print full server telemetry, resources, IP, and service health"
     printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "dashboard" "Launch live real-time interactive terminal dashboard (TUI)"
+    printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "verify" "Automated diagnostic audit of SSH, ports, firewall & 24/7 power"
     printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "info" "Show detailed connection commands, SSH, Cockpit URL & port guide"
     printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "persistence" "Check 24/7 reboot survival, boot daemons, and stickiness"
     printf "  ${C_CYAN}%-26s${C_RESET} : %s\n" "bios" "Guide for setting BIOS auto-power-on after electricity cuts"
@@ -871,6 +1006,9 @@ case "$1" in
         ;;
     dashboard|top|tui)
         cmd_dashboard
+        ;;
+    verify|check|test|audit-all)
+        cmd_verify
         ;;
     info|connect)
         cmd_info

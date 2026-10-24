@@ -538,8 +538,28 @@ configure_user_permissions() {
 configure_openssh() {
     step "Configuring & Hardening OpenSSH Server"
 
+    # 1. Ensure /etc/ssh/sshd_config includes drop-ins and allows password/key auth
     mkdir -p /etc/ssh/sshd_config.d
-    cat > /etc/ssh/sshd_config.d/99-server-my-pc.conf << EOF
+    if [ -f /etc/ssh/sshd_config ]; then
+        if ! grep -qE "^\s*Include\s+/etc/ssh/sshd_config\.d/\*\.conf" /etc/ssh/sshd_config; then
+            sed -i '1s|^|Include /etc/ssh/sshd_config.d/*.conf\n|' /etc/ssh/sshd_config
+        fi
+        sed -i 's/^[#\s]*PasswordAuthentication\s\+no/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null || true
+        sed -i 's/^[#\s]*KbdInteractiveAuthentication\s\+no/KbdInteractiveAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null || true
+    fi
+
+    # 2. Clean out any conflicting drop-ins that disable password authentication
+    for f in /etc/ssh/sshd_config.d/*.conf; do
+        if [ -f "$f" ] && [ "$(basename "$f")" != "00-server-my-pc.conf" ]; then
+            sed -i 's/^[#\s]*PasswordAuthentication\s\+no/PasswordAuthentication yes/' "$f" 2>/dev/null || true
+        fi
+    done
+
+    # 3. Write our prioritized drop-in (00- prefix ensures it is parsed first by OpenSSH)
+    local root_permit="yes"
+    [ "$TARGET_USER" != "root" ] && root_permit="prohibit-password"
+
+    cat > /etc/ssh/sshd_config.d/00-server-my-pc.conf << EOF
 # server-my-pc OpenSSH Server Configuration
 Port ${SSH_PORT}
 AddressFamily any
@@ -547,11 +567,12 @@ ListenAddress 0.0.0.0
 ListenAddress ::
 
 # Authentication
-PermitRootLogin prohibit-password
+PermitRootLogin ${root_permit}
 PubkeyAuthentication yes
 PasswordAuthentication yes
+KbdInteractiveAuthentication yes
 PermitEmptyPasswords no
-MaxAuthTries 5
+MaxAuthTries 6
 
 # Session Keep-Alive (Prevents SSH disconnects during idle)
 ClientAliveInterval 60
@@ -563,13 +584,18 @@ X11Forwarding no
 AllowTcpForwarding yes
 EOF
 
-    # Test configuration and restart sshd
-    local ssh_service="ssh"
-    systemctl list-unit-files | grep -q "sshd.service" && ssh_service="sshd"
+    # 4. Restart SSH daemon across systemd, socket activation, and legacy init systems
+    systemctl daemon-reload >/dev/null 2>&1 || true
 
-    systemctl enable "$ssh_service" >/dev/null 2>&1 || true
-    systemctl restart "$ssh_service" >/dev/null 2>&1 || true
-    success "OpenSSH configured on port ${SSH_PORT} with session keep-alives and enabled on boot."
+    for s in ssh sshd; do
+        if systemctl list-unit-files 2>/dev/null | grep -qE "^${s}\.(service|socket)"; then
+            systemctl enable "$s" >/dev/null 2>&1 || true
+            systemctl restart "$s" >/dev/null 2>&1 || true
+        fi
+    done
+
+    service ssh restart >/dev/null 2>&1 || service sshd restart >/dev/null 2>&1 || true
+    success "OpenSSH configured on port ${SSH_PORT} (Password & Key auth active) and enabled on boot."
 }
 
 # Activate Instant SSH Access (Phase 1)
@@ -610,11 +636,18 @@ activate_instant_ssh() {
     configure_openssh
 
     # Ensure firewall does not block SSH immediately
-    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-        ufw allow "${SSH_PORT}/tcp" >/dev/null 2>&1 || true
-    elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state 2>/dev/null | grep -q "running"; then
+    if command -v ufw >/dev/null 2>&1; then
+        ufw allow "${SSH_PORT}/tcp" comment "SSH Server" >/dev/null 2>&1 || true
+    fi
+    if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state 2>/dev/null | grep -q "running"; then
         firewall-cmd --permanent --add-port="${SSH_PORT}/tcp" >/dev/null 2>&1 || true
         firewall-cmd --reload >/dev/null 2>&1 || true
+    fi
+    if command -v iptables >/dev/null 2>&1; then
+        iptables -I INPUT 1 -p tcp --dport "${SSH_PORT}" -j ACCEPT 2>/dev/null || true
+    fi
+    if command -v ip6tables >/dev/null 2>&1; then
+        ip6tables -I INPUT 1 -p tcp --dport "${SSH_PORT}" -j ACCEPT 2>/dev/null || true
     fi
 
     # Detect IPs immediately
@@ -655,14 +688,20 @@ configure_firewall_and_security() {
         ufw default deny incoming >/dev/null 2>&1 || true
         ufw default allow outgoing >/dev/null 2>&1 || true
         ufw allow "${SSH_PORT}/tcp" comment "SSH Server" >/dev/null 2>&1 || true
+        [ "${SSH_PORT}" -ne 22 ] && ufw allow 22/tcp comment "SSH Default" >/dev/null 2>&1 || true
+        # Always allow entire local LAN subnets
+        ufw allow from 192.168.0.0/16 to any port "${SSH_PORT}" proto tcp >/dev/null 2>&1 || true
+        ufw allow from 10.0.0.0/8 to any port "${SSH_PORT}" proto tcp >/dev/null 2>&1 || true
+        ufw allow from 172.16.0.0/12 to any port "${SSH_PORT}" proto tcp >/dev/null 2>&1 || true
         if [ "$INSTALL_COCKPIT" = true ]; then
             ufw allow 9090/tcp comment "Cockpit Web Console" >/dev/null 2>&1 || true
         fi
         echo "y" | ufw enable >/dev/null 2>&1 || true
-        success "UFW firewall active: Port ${SSH_PORT} (SSH) allowed."
+        success "UFW firewall active: Port ${SSH_PORT} (SSH) and LAN subnets unconditionally allowed."
     elif command -v firewall-cmd >/dev/null 2>&1; then
         systemctl enable --now firewalld >/dev/null 2>&1 || true
         firewall-cmd --permanent --add-port="${SSH_PORT}/tcp" >/dev/null 2>&1 || true
+        firewall-cmd --permanent --add-service=ssh >/dev/null 2>&1 || true
         if [ "$INSTALL_COCKPIT" = true ]; then
             firewall-cmd --permanent --add-port=9090/tcp >/dev/null 2>&1 || true
         fi
@@ -670,23 +709,36 @@ configure_firewall_and_security() {
         success "firewalld active: Port ${SSH_PORT} (SSH) allowed."
     fi
 
+    # Raw iptables safety net (guarantees packet acceptance at kernel level)
+    if command -v iptables >/dev/null 2>&1; then
+        iptables -I INPUT 1 -p tcp --dport "${SSH_PORT}" -j ACCEPT 2>/dev/null || true
+        iptables -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+        iptables -I INPUT 1 -i lo -j ACCEPT 2>/dev/null || true
+    fi
+    if command -v ip6tables >/dev/null 2>&1; then
+        ip6tables -I INPUT 1 -p tcp --dport "${SSH_PORT}" -j ACCEPT 2>/dev/null || true
+    fi
+
     # Fail2ban SSH Jail Configuration
     if command -v fail2ban-client >/dev/null 2>&1; then
         mkdir -p /etc/fail2ban/jail.d
-        cat > /etc/fail2ban/jail.d/99-server-my-pc.conf << EOF
+        touch /var/log/auth.log 2>/dev/null || true
+        cat > /etc/fail2ban/jail.d/00-server-my-pc.conf << EOF
+[DEFAULT]
+ignoreip = 127.0.0.1/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10
+
 [sshd]
 enabled = true
 port = ${SSH_PORT}
-filter = sshd
-logpath = /var/log/auth.log
-maxretry = 5
+ignoreip = 127.0.0.1/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10
+maxretry = 6
 bantime = 1h
 findtime = 10m
 EOF
-        [ ! -f /var/log/auth.log ] && [ -f /var/log/secure ] && sed -i 's|/var/log/auth.log|/var/log/secure|' /etc/fail2ban/jail.d/99-server-my-pc.conf
         systemctl enable fail2ban >/dev/null 2>&1 || true
         systemctl restart fail2ban >/dev/null 2>&1 || true
-        success "Fail2ban brute-force protection active on SSH port ${SSH_PORT}."
+        fail2ban-client unban --all >/dev/null 2>&1 || true
+        success "Fail2ban protection active on port ${SSH_PORT} (Local LAN permanently whitelisted)."
     fi
 }
 
@@ -936,8 +988,8 @@ install_serverctl() {
 
     if [ -f "./serverctl" ]; then
         cp "./serverctl" /usr/local/bin/serverctl
-    elif [ ! -f "/usr/local/bin/serverctl" ]; then
-        info "Fetching serverctl management CLI from repository..."
+    else
+        info "Fetching latest serverctl management CLI from repository..."
         curl -sSL "https://raw.githubusercontent.com/8nc0x/server-my-pc/main/serverctl" -o /usr/local/bin/serverctl 2>/dev/null || \
         wget -qO /usr/local/bin/serverctl "https://raw.githubusercontent.com/8nc0x/server-my-pc/main/serverctl" 2>/dev/null || true
     fi
@@ -988,9 +1040,9 @@ EOF
         printf "${C_WHITE}│  %-24s: ${C_GRAY}%-45s${C_WHITE}│\n" "Login Credentials" "Same as your Linux user (${TARGET_USER})"
     fi
     echo -e "${C_WHITE}├── QUICK SERVER MANAGEMENT COMMANDS ────────────────────────────────────────┤${C_RESET}"
+    printf "${C_WHITE}│  ${C_CYAN}%-26s${C_WHITE} : %-43s│\n" "serverctl verify" "Run full diagnostic check of SSH, firewall & ports"
     printf "${C_WHITE}│  ${C_CYAN}%-26s${C_WHITE} : %-43s│\n" "serverctl status" "View full hardware & network telemetry"
     printf "${C_WHITE}│  ${C_CYAN}%-26s${C_WHITE} : %-43s│\n" "serverctl dashboard" "Open real-time interactive terminal TUI"
-    printf "${C_WHITE}│  ${C_CYAN}%-26s${C_WHITE} : %-43s│\n" "serverctl open-port <port>" "Open firewall port and router UPnP"
     printf "${C_WHITE}│  ${C_CYAN}%-26s${C_WHITE} : %-43s│\n" "serverctl tunnel start" "Start zero-signup CGNAT remote tunnel"
     printf "${C_WHITE}│  ${C_CYAN}%-26s${C_WHITE} : %-43s│\n" "serverctl apps list" "1-click deploy Portainer, Nginx, etc."
     printf "${C_WHITE}│  ${C_CYAN}%-26s${C_WHITE} : %-43s│\n" "serverctl uninstall" "Restore laptop to standard defaults"
