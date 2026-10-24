@@ -305,22 +305,22 @@ install_base_packages() {
     local base_pkgs=()
     case "$PKG_MGR" in
         apt)
-            base_pkgs=(openssh-server sudo curl wget ufw fail2ban iproute2 lm-sensors miniupnpc ethtool procps)
+            base_pkgs=(openssh-server sudo curl wget git ufw fail2ban iproute2 lm-sensors miniupnpc ethtool procps)
             ;;
         dnf|yum)
-            base_pkgs=(openssh-server sudo curl wget firewalld fail2ban iproute lm_sensors miniupnpc ethtool procps-ng)
+            base_pkgs=(openssh-server sudo curl wget git firewalld fail2ban iproute lm_sensors miniupnpc ethtool procps-ng)
             ;;
         pacman)
-            base_pkgs=(openssh sudo curl wget ufw fail2ban iproute2 lm_sensors miniupnpc ethtool procps-ng)
+            base_pkgs=(openssh sudo curl wget git ufw fail2ban iproute2 lm_sensors miniupnpc ethtool procps-ng)
             ;;
         zypper)
-            base_pkgs=(openssh sudo curl wget ufw fail2ban iproute2 sensors miniupnpc ethtool)
+            base_pkgs=(openssh sudo curl wget git ufw fail2ban iproute2 sensors miniupnpc ethtool)
             ;;
         apk)
-            base_pkgs=(openssh sudo curl wget iptables iproute2 lm-sensors miniupnpc ethtool)
+            base_pkgs=(openssh sudo curl wget git iptables iproute2 lm-sensors miniupnpc ethtool)
             ;;
         xbps)
-            base_pkgs=(openssh sudo curl wget ufw fail2ban iproute2 lm_sensors miniupnpc ethtool)
+            base_pkgs=(openssh sudo curl wget git ufw fail2ban iproute2 lm_sensors miniupnpc ethtool)
             ;;
     esac
 
@@ -843,14 +843,12 @@ attempt_upnp_port_forward() {
 install_serverctl() {
     step "Installing Global Management CLI (serverctl)"
 
-    local src_cli="./serverctl"
-    if [ ! -f "$src_cli" ]; then
-        # Try fetching or creating if missing
-        src_cli="/usr/local/bin/serverctl"
-    fi
-
     if [ -f "./serverctl" ]; then
         cp "./serverctl" /usr/local/bin/serverctl
+    elif [ ! -f "/usr/local/bin/serverctl" ]; then
+        info "Fetching serverctl management CLI from repository..."
+        curl -sSL "https://raw.githubusercontent.com/8nc0x/server-my-pc/main/serverctl" -o /usr/local/bin/serverctl 2>/dev/null || \
+        wget -qO /usr/local/bin/serverctl "https://raw.githubusercontent.com/8nc0x/server-my-pc/main/serverctl" 2>/dev/null || true
     fi
     chmod +x /usr/local/bin/serverctl
     ln -sf /usr/local/bin/serverctl /usr/local/bin/server-my-pc

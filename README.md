@@ -27,18 +27,33 @@ Have an old laptop, desktop, or spare computer collecting dust? **`server-my-pc`
 
 ## 🚀 Quick Start (1-Click Run)
 
-### 🐧 On Linux (Any Distro: Ubuntu, Debian, Arch, Fedora, etc.)
-Open your terminal and run:
+### ⚡ No Git Installed? No Problem! (Instant 1-Liner)
 
+#### 🐧 On Linux (No Git Required):
+Paste into your terminal and press Enter:
+```bash
+curl -sSL https://raw.githubusercontent.com/8nc0x/server-my-pc/main/setup.sh | sudo bash
+```
+*(Or if your machine only has `wget`: `wget -qO- https://raw.githubusercontent.com/8nc0x/server-my-pc/main/setup.sh | sudo bash`)*
+
+#### 🪟 On Windows (No Git Required):
+Open **PowerShell as Administrator** and paste:
+```powershell
+irm https://raw.githubusercontent.com/8nc0x/server-my-pc/main/setup.ps1 | iex
+```
+
+---
+
+### 📦 Standard Git Clone Method
+
+#### 🐧 Linux:
 ```bash
 git clone https://github.com/8nc0x/server-my-pc.git
 cd server-my-pc
 sudo bash setup.sh
 ```
 
-*(Or as a non-root user, simply `bash setup.sh` — it will automatically self-elevate with sudo!)*
-
-### 🪟 On Windows (Windows 10 / 11 / Server)
+#### 🪟 Windows:
 1. Clone or download the repository.
 2. Right-click **`setup.bat`** and select **"Run as administrator"**.
    *(Or in Administrator PowerShell: `powershell -ExecutionPolicy Bypass -File .\setup.ps1`)*
