@@ -427,60 +427,86 @@ cmd_battery() {
     esac
 }
 
-# Zero-Signup CGNAT Tunnel Helper
+# Zero-Signup CGNAT Tunnel Helper (Direct TCP without client software)
 cmd_tunnel() {
     local action="${1:-status}"
+    local port="${SSH_PORT:-22}"
+    [ -f "${CONFIG_DIR}/ssh_port" ] && port=$(cat "${CONFIG_DIR}/ssh_port")
 
     case "$action" in
         start)
             require_root
-            echo -e "${C_CYAN}[*] Starting zero-signup encrypted tunnel for remote access...${C_RESET}"
-            
-            # Check for cloudflared
-            if ! command -v cloudflared >/dev/null 2>&1; then
-                echo -e "${C_YELLOW}[*] Installing Cloudflare Quick Tunnel binary (zero-account required)...${C_RESET}"
-                local arch
-                arch=$(uname -m)
-                local url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
-                [ "$arch" = "aarch64" ] && url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
-                [ "$arch" = "armv7l" ] && url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm"
-                curl -sSL "$url" -o /usr/local/bin/cloudflared
-                chmod +x /usr/local/bin/cloudflared
-            fi
+            echo -e "${C_CYAN}[*] Starting zero-signup encrypted TCP tunnel for remote access...${C_RESET}"
 
-            echo -e "${C_GREEN}[*] Launching Quick Tunnel for SSH (Port 22)...${C_RESET}"
+            systemctl stop server-tunnel.service 2>/dev/null || true
+            pkill -f "a.pinggy.io" 2>/dev/null || true
             mkdir -p "$CONFIG_DIR"
             touch "${CONFIG_DIR}/tunnel.enabled"
-            nohup cloudflared tunnel --url ssh://localhost:22 > /var/log/server-my-pc-tunnel.log 2>&1 &
-            sleep 3
-            local tunnel_url
-            tunnel_url=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /var/log/server-my-pc-tunnel.log | head -n1 || echo "")
-            if [ -n "$tunnel_url" ]; then
-                echo -e "${C_GREEN}${C_BOLD}[✓] Tunnel is ACTIVE & PERSISTENT!${C_RESET}"
-                echo -e "Public Tunnel Hostname: ${C_CYAN}${tunnel_url}${C_RESET}"
-                echo -e "${C_DIM}This tunnel will now automatically resume after every reboot.${C_RESET}"
-                echo -e "You can connect via Cloudflare Access or cloudflared client."
+
+            # Create systemd service for 24/7 auto-restart & persistence across reboots
+            cat > /etc/systemd/system/server-tunnel.service << EOF
+[Unit]
+Description=server-my-pc Zero-Config Remote SSH Tunnel
+After=network.target ssh.service sshd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/ssh -p 443 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -R0:localhost:${port} a.pinggy.io
+Restart=always
+RestartSec=5
+StandardOutput=file:/var/log/server-my-pc-tunnel.log
+StandardError=file:/var/log/server-my-pc-tunnel.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+            systemctl daemon-reload
+            systemctl enable --now server-tunnel.service >/dev/null 2>&1
+
+            echo -e "${C_YELLOW}[*] Negotiating public TCP tunnel port...${C_RESET}"
+            sleep 4
+
+            local tunnel_cmd=""
+            if [ -f /var/log/server-my-pc-tunnel.log ]; then
+                tunnel_cmd=$(grep -oE 'ssh -p [0-9]+ [a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+' /var/log/server-my-pc-tunnel.log | head -n1 || echo "")
+            fi
+
+            if [ -n "$tunnel_cmd" ]; then
+                echo -e "\n${C_GREEN}${C_BOLD}========================================================================${C_RESET}"
+                echo -e "  ${C_GREEN}${C_BOLD}⚡ ZERO-CONFIG REMOTE INTERNET ACCESS IS NOW LIVE! ⚡${C_RESET}"
+                echo -e "${C_GREEN}${C_BOLD}========================================================================${C_RESET}"
+                echo -e "  ${C_WHITE}You can connect from ${C_BOLD}ANYWHERE IN THE WORLD${C_RESET} (Cellular, Hotspot, Office):"
+                echo -e "  ${C_CYAN}${C_BOLD}► Remote SSH Command :${C_RESET} ${C_GREEN}${C_BOLD}${tunnel_cmd}${C_RESET}"
+                echo -e "  ${C_DIM}(Works from any standard Windows CMD/PowerShell without installing extra software!)${C_RESET}\n"
             else
-                echo -e "${C_YELLOW}[*] Tunnel started in background. Check: serverctl tunnel status${C_RESET}"
+                echo -e "${C_GREEN}[✓] Remote tunnel daemon started in background.${C_RESET}"
+                echo -e "Run ${C_CYAN}serverctl tunnel status${C_RESET} to display the public SSH command."
             fi
             ;;
         stop)
             require_root
             rm -f "${CONFIG_DIR}/tunnel.enabled"
-            pkill -f "cloudflared tunnel" 2>/dev/null || true
+            systemctl disable --now server-tunnel.service 2>/dev/null || true
+            pkill -f "a.pinggy.io" 2>/dev/null || true
             echo -e "${C_GREEN}[✓] Remote tunnel stopped and autostart disabled.${C_RESET}"
             ;;
         status)
-            if pgrep -f "cloudflared tunnel" >/dev/null 2>&1; then
-                echo -e "${C_GREEN}● Remote Tunnel: RUNNING${C_RESET}"
+            if systemctl is-active --quiet server-tunnel.service 2>/dev/null || pgrep -f "a.pinggy.io" >/dev/null 2>&1; then
+                echo -e "${C_GREEN}● Remote Tunnel: ACTIVE & RUNNING${C_RESET}"
                 if [ -f /var/log/server-my-pc-tunnel.log ]; then
-                    local url
-                    url=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /var/log/server-my-pc-tunnel.log | tail -n1 || echo "Checking logs...")
-                    echo -e "Public Endpoint: ${C_CYAN}${url}${C_RESET}"
+                    local cmd
+                    cmd=$(grep -oE 'ssh -p [0-9]+ [a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+' /var/log/server-my-pc-tunnel.log | tail -n1 || echo "")
+                    if [ -n "$cmd" ]; then
+                        echo -e "► Remote SSH Command: ${C_GREEN}${C_BOLD}${cmd}${C_RESET}"
+                    else
+                        echo -e "${C_DIM}Tunnel is active. View logs: tail -n 20 /var/log/server-my-pc-tunnel.log${C_RESET}"
+                    fi
                 fi
             else
                 echo -e "${C_YELLOW}○ Remote Tunnel: INACTIVE${C_RESET}"
-                echo -e "Run: ${C_CYAN}sudo serverctl tunnel start${C_RESET} to enable."
+                echo -e "Run: ${C_CYAN}sudo serverctl tunnel start${C_RESET} to enable 24/7 internet access without router port forward."
             fi
             ;;
         *)

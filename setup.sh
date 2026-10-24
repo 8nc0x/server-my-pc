@@ -633,13 +633,13 @@ EOF
     echo -e "${C_RESET}"
     echo -e "  ${C_BOLD}You can connect right now from another machine:${C_RESET}"
     if [ "$SSH_PORT" -eq 22 ]; then
-        echo -e "  ${C_CYAN}${C_BOLD}► Local WiFi SSH :${C_RESET} ${C_GREEN}ssh ${TARGET_USER}@${local_ip}${C_RESET}"
-        echo -e "  ${C_YELLOW}${C_BOLD}► Public WAN SSH :${C_RESET} ${C_YELLOW}ssh ${TARGET_USER}@${public_ip}${C_RESET}"
+        echo -e "  ${C_CYAN}${C_BOLD}► Same Home WiFi (LAN) :${C_RESET} ${C_GREEN}ssh ${TARGET_USER}@${local_ip}${C_RESET}  ${C_BOLD}${C_WHITE}(← USE THIS if on the same Wi-Fi!)${C_RESET}"
+        echo -e "  ${C_YELLOW}${C_BOLD}► Outside Internet     :${C_RESET} ${C_YELLOW}ssh ${TARGET_USER}@${public_ip}${C_RESET}  ${C_DIM}(For remote outside home / cellular)${C_RESET}"
     else
-        echo -e "  ${C_CYAN}${C_BOLD}► Local WiFi SSH :${C_RESET} ${C_GREEN}ssh -p ${SSH_PORT} ${TARGET_USER}@${local_ip}${C_RESET}"
-        echo -e "  ${C_YELLOW}${C_BOLD}► Public WAN SSH :${C_RESET} ${C_YELLOW}ssh -p ${SSH_PORT} ${TARGET_USER}@${public_ip}${C_RESET}"
+        echo -e "  ${C_CYAN}${C_BOLD}► Same Home WiFi (LAN) :${C_RESET} ${C_GREEN}ssh -p ${SSH_PORT} ${TARGET_USER}@${local_ip}${C_RESET}  ${C_BOLD}${C_WHITE}(← USE THIS if on the same Wi-Fi!)${C_RESET}"
+        echo -e "  ${C_YELLOW}${C_BOLD}► Outside Internet     :${C_RESET} ${C_YELLOW}ssh -p ${SSH_PORT} ${TARGET_USER}@${public_ip}${C_RESET}  ${C_DIM}(For remote outside home / cellular)${C_RESET}"
     fi
-    echo -e "  ${C_WHITE}► Password       :${C_RESET} ${C_WHITE}${PASSWORD_DISPLAY}${C_RESET}"
+    echo -e "  ${C_WHITE}► Password             :${C_RESET} ${C_WHITE}${PASSWORD_DISPLAY}${C_RESET}"
     echo -e "  ========================================================================\n"
     info "SSH port ${SSH_PORT} is verified and listening. You can switch to SSH anytime."
     info "Now continuing Phase 2 (24/7 lid close, power tuning, background tools)..."
@@ -975,12 +975,13 @@ EOF
     printf "${C_WHITE}│  %-24s: ${C_WHITE}%-45s${C_WHITE}│\n" "SSH Password" "$PASSWORD_DISPLAY"
     echo -e "${C_WHITE}├── READY-TO-COPY SSH COMMANDS ──────────────────────────────────────────────┤${C_RESET}"
     if [ "$SSH_PORT" -eq 22 ]; then
-        printf "${C_WHITE}│  %-24s: ${C_CYAN}%-45s${C_WHITE}│\n" "Connect from Home WiFi" "ssh ${TARGET_USER}@${local_ip}"
-        printf "${C_WHITE}│  %-24s: ${C_YELLOW}%-45s${C_WHITE}│\n" "Connect from Outside" "ssh ${TARGET_USER}@${public_ip}"
+        printf "${C_WHITE}│  %-24s: ${C_GREEN}%-45s${C_WHITE}│\n" "Same Home WiFi (LAN)" "ssh ${TARGET_USER}@${local_ip}"
+        printf "${C_WHITE}│  %-24s: ${C_YELLOW}%-45s${C_WHITE}│\n" "Outside via WAN IP" "ssh ${TARGET_USER}@${public_ip}"
     else
-        printf "${C_WHITE}│  %-24s: ${C_CYAN}%-45s${C_WHITE}│\n" "Connect from Home WiFi" "ssh -p ${SSH_PORT} ${TARGET_USER}@${local_ip}"
-        printf "${C_WHITE}│  %-24s: ${C_YELLOW}%-45s${C_WHITE}│\n" "Connect from Outside" "ssh -p ${SSH_PORT} ${TARGET_USER}@${public_ip}"
+        printf "${C_WHITE}│  %-24s: ${C_GREEN}%-45s${C_WHITE}│\n" "Same Home WiFi (LAN)" "ssh -p ${SSH_PORT} ${TARGET_USER}@${local_ip}"
+        printf "${C_WHITE}│  %-24s: ${C_YELLOW}%-45s${C_WHITE}│\n" "Outside via WAN IP" "ssh -p ${SSH_PORT} ${TARGET_USER}@${public_ip}"
     fi
+    echo -e "${C_WHITE}│  ${C_YELLOW}${C_BOLD}* Note: If both devices are on same Wi-Fi, ALWAYS use LAN IP!${C_RESET}             ${C_WHITE}│"
     if [ "$INSTALL_COCKPIT" = true ]; then
         echo -e "${C_WHITE}├── WEB MANAGEMENT CONSOLE (COCKPIT) ────────────────────────────────────────┤${C_RESET}"
         printf "${C_WHITE}│  %-24s: ${C_BLUE}%-45s${C_WHITE}│\n" "Web Terminal & Admin" "https://${local_ip}:9090"

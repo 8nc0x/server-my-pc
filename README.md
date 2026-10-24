@@ -220,37 +220,46 @@ Follow the simple steps in your motherboard's BIOS to set **"Restore on AC/Power
 
 When `setup.sh` finishes, it outputs your exact connection commands:
 
-```
+```text
 ┌── 24/7 SERVER CONNECTION DETAILS ──────────────────────────────────────────┐
 │  Local Network IP (LAN)  : 192.168.1.50                                    │
-│  Public Internet IP (WAN): 203.0.113.195                                   │
+│  Public Internet IP (WAN): 103.x.x.x                                       │
 │  SSH Port                : 22                                              │
 │  Server User             : owner                                           │
 ├── READY-TO-COPY SSH COMMANDS ──────────────────────────────────────────────┤
-│  Connect from Home WiFi  : ssh owner@192.168.1.50                          │
-│  Connect from Outside    : ssh owner@203.0.113.195                         │
+│  Same Home WiFi (LAN)    : ssh owner@192.168.1.50                          │
+│  Outside via WAN IP      : ssh owner@103.x.x.x                             │
 ├── WEB MANAGEMENT CONSOLE (COCKPIT) ────────────────────────────────────────┤
 │  Web Terminal & Admin    : https://192.168.1.50:9090                       │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
+> [!IMPORTANT]
+> **Getting `ssh: connect to host ... port 22: Connection timed out`?**
+> - **If you are on the SAME Wi-Fi as your server:** You **must** use the **LAN IP** (`ssh user@192.168.1.x`). Home Wi-Fi routers block connections trying to loop back to their own Public IP (NAT loopback prevention).
+> - **If connecting from OUTSIDE across the internet:** Most home ISPs/routers block incoming port 22 by default unless you forward port 22 on your router or start a zero-config tunnel below.
+
 ### Accessing From Anywhere (Outside Home WiFi)
 
-1. **Option A: Automatic UPnP (Default)**
-   - `setup.sh` automatically attempts to open the port on your router via UPnP. If your router supports UPnP, `ssh user@PUBLIC_IP` will work immediately!
+1. **Option A: Zero-Config Remote Tunnel (Works 100% Anywhere - No Router Setup Needed)**
+   - On the server machine, simply run:
+     ```bash
+     sudo serverctl tunnel start
+     ```
+   - This instantly negotiates an encrypted public TCP tunnel and gives you a direct command:
+     ```text
+     ssh -p 49152 owner@a.pinggy.io
+     ```
+   - You can copy and run that command directly on any Windows CMD/PowerShell, Mac, or Linux from anywhere in the world! It automatically restarts and stays persistent across reboots.
 
-2. **Option B: Manual Router Port Forwarding**
+2. **Option B: Automatic Router UPnP (Default)**
+   - `setup.sh` automatically attempts to open port 22 on your router via UPnP. If your router supports UPnP, `ssh user@PUBLIC_IP` will work directly.
+
+3. **Option C: Manual Router Port Forwarding**
    - Open your router admin page (e.g. `http://192.168.1.1` or `192.168.0.1`).
    - Go to **Port Forwarding / Virtual Servers**.
    - Forward **Port 22 (TCP)** to your server's Local IP (`192.168.1.x`).
    - Optional: Forward **Port 9090 (TCP)** to access the Cockpit Web Console remotely.
-
-3. **Option C: Zero-Signup Cloudflare Quick Tunnel (For CGNAT / Blocked Routers)**
-   - If your ISP uses CGNAT or your router blocks port forwarding, run:
-     ```bash
-     sudo serverctl tunnel start
-     ```
-   - This provides an instant, zero-account encrypted public hostname that lets you SSH in from anywhere in the world!
 
 ---
 
