@@ -25,22 +25,28 @@ Have an old laptop, desktop, or spare computer collecting dust? **`server-my-pc`
 
 ---
 
-## 🚀 Quick Start (1-Click Run)
+## 🚀 Quick Start (Ultra-Short 3-Second Commands)
 
-### ⚡ No Git Installed? No Problem! (Instant 1-Liner)
-
-#### 🐧 On Linux (No Git Required):
-Paste into your terminal and press Enter:
+### 🐧 On Linux (Takes 3 Seconds to Type):
 ```bash
-curl -sSL https://raw.githubusercontent.com/8nc0x/server-my-pc/main/setup.sh | sudo bash
+curl -sL is.gd/serverpc | bash
 ```
-*(Or if your machine only has `wget`: `wget -qO- https://raw.githubusercontent.com/8nc0x/server-my-pc/main/setup.sh | sudo bash`)*
+*(Or if your machine only has `wget`: `wget -qO- is.gd/serverpc | bash`)*
 
-#### 🪟 On Windows (No Git Required):
-Open **PowerShell as Administrator** and paste:
+### 🪟 On Windows (In Administrator PowerShell):
 ```powershell
-irm https://raw.githubusercontent.com/8nc0x/server-my-pc/main/setup.ps1 | iex
+irm is.gd/serverwin | iex
 ```
+
+> **Zero Git required. Zero long URLs to memorize.** Just 5 words, press Enter, and your computer turns into an always-on 24/7 server.
+
+---
+
+### 🌐 Direct GitHub Fallback URLs
+
+If you prefer direct GitHub URLs without shorteners:
+- **Linux**: `curl -sL https://github.com/8nc0x/server-my-pc/raw/main/setup.sh | sudo bash`
+- **Windows**: `irm https://github.com/8nc0x/server-my-pc/raw/main/setup.ps1 | iex`
 
 ---
 
